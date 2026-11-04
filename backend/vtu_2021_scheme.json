@@ -1,0 +1,63 @@
+{
+  "name": "VTU B.E./B.Tech – 2021 Scheme",
+  "description": "Shared VTU grading template for the 2021 scheme. Grade points supplied by the project owner; confirm against the applicable official VTU regulations before academic use.",
+  "max_grade_point": 10,
+  "grades": [
+    {
+      "label": "O",
+      "grade_point": 10,
+      "counts_in_gpa": true,
+      "is_passing": true,
+      "sort_order": 1
+    },
+    {
+      "label": "A+",
+      "grade_point": 9,
+      "counts_in_gpa": true,
+      "is_passing": true,
+      "sort_order": 2
+    },
+    {
+      "label": "A",
+      "grade_point": 8,
+      "counts_in_gpa": true,
+      "is_passing": true,
+      "sort_order": 3
+    },
+    {
+      "label": "B+",
+      "grade_point": 7,
+      "counts_in_gpa": true,
+      "is_passing": true,
+      "sort_order": 4
+    },
+    {
+      "label": "B",
+      "grade_point": 6,
+      "counts_in_gpa": true,
+      "is_passing": true,
+      "sort_order": 5
+    },
+    {
+      "label": "C",
+      "grade_point": 5,
+      "counts_in_gpa": true,
+      "is_passing": true,
+      "sort_order": 6
+    },
+    {
+      "label": "P",
+      "grade_point": 4,
+      "counts_in_gpa": true,
+      "is_passing": true,
+      "sort_order": 7
+    },
+    {
+      "label": "F",
+      "grade_point": 0,
+      "counts_in_gpa": true,
+      "is_passing": false,
+      "sort_order": 8
+    }
+  ]
+}

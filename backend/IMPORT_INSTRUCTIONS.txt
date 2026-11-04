@@ -1,0 +1,11 @@
+VTU shared grading scale import
+
+Extract these JSON files into your backend folder (or use absolute paths). Run each command from the backend folder with your .venv active:
+
+python -m flask --app run.py import-grading-scale "..\VTU_Grading_Import_2021_2025\vtu_2021_scheme.json" --admin-email ganeshhidaduggi8@gmail.com
+python -m flask --app run.py import-grading-scale "..\VTU_Grading_Import_2021_2025\vtu_2022_scheme.json" --admin-email ganeshhidaduggi8@gmail.com
+python -m flask --app run.py import-grading-scale "..\VTU_Grading_Import_2021_2025\vtu_2023_scheme.json" --admin-email ganeshhidaduggi8@gmail.com
+python -m flask --app run.py import-grading-scale "..\VTU_Grading_Import_2021_2025\vtu_2024_scheme.json" --admin-email ganeshhidaduggi8@gmail.com
+python -m flask --app run.py import-grading-scale "..\VTU_Grading_Import_2021_2025\vtu_2025_scheme.json" --admin-email ganeshhidaduggi8@gmail.com
+
+All eight grades are marked counts_in_gpa=true as requested. F has grade point 0 and is_passing=false. These are shared templates, not per-user copies. Existing semesters are not modified.

@@ -1,0 +1,58 @@
+services:
+  db:
+    image: mysql:8.0
+    container_name: sss-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    ports:
+      - "3307:3306"   # host 3307 avoids clashing with a locally installed MySQL
+    volumes:
+      - sss_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    container_name: sss-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      APP_ENV: production
+      MYSQL_HOST: db
+      MYSQL_PORT: "3306"
+      UPLOAD_FOLDER: /app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "5000:5000"
+    volumes:
+      - sss_uploads:/app/uploads
+    command: >
+      sh -c "flask --app run.py db upgrade &&
+             waitress-serve --host=0.0.0.0 --port=5000 run:app"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+        VITE_MAPS_PROVIDER: ${VITE_MAPS_PROVIDER}
+    container_name: sss-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+
+volumes:
+  sss_mysql_data:
+  sss_uploads:

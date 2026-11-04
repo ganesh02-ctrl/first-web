@@ -1,0 +1,2793 @@
+I'll start by checking the existing project files and the knowledge base so the upgrade builds on your actual code and doesn't replace it.
+
+Search and Answer from Document
+List the exact fields/columns of the StudentProfile model (student_profiles) and the profile schema used for PATCH validation. (+5)
+View
+Team Brain
+Searching (?i)VTU|scholarship|SGPA|district
+View
+I couldn't do several things you asked for, and you should know which before you use any of this:
+
+No ZIP and nothing was run. There's no file-generation or code-execution tool in this chat, so I couldn't build a ZIP, start the servers, run tests or look at your MySQL data. The code is below, file by file, and none of it has been executed yet.
+Some of your existing code wasn't visible. The archive of your earlier batches doesn't include the StudentProfile, Scholarship, GradingScale and utils/gpa.py definitions, or your conftest fixtures and axios file. I built the new code around the names I could confirm. Where I had to assume something (the role field on users, the log_action signature, the axios path, upload form field names), I've marked it. Section 5 lists those checks.
+The VTU grading rules are not verified. I couldn't open VTU's regulation documents from here. I haven't written grading values into the code as fact. The grade tables are a draft file that loads as unverified and stays hidden from students. Only an administrator can publish a scheme, after checking it against the official regulation and entering its URL.
+1. Why "No Scholarships Found" happens
+The search code I could see shows four likely causes. Run flask scholarships diagnose (added below) to see which one applies to your database:
+
+No record has been both verified and published. The CSV importer creates every row as unverified and unpublished on purpose. Students only see published records, so after an import nobody sees anything until an admin verifies and publishes. This is the most likely cause.
+Expired records are filtered out. Any record whose closing date has passed is hidden by default.
+Education level filtering was case-sensitive. A profile value like Undergraduate didn't match a criterion stored as undergraduate. The new search compares in lower case.
+The frontend may be reading the response wrongly. If the API returns {data: {items}} and the page reads res.data.items, it gets an empty list. The new asPage() helper accepts all common response shapes.
+The app does not add any placeholder scholarships. If the diagnosis shows zero published records, the empty message is correct, and the fix is for an admin to enter real records and verify them.
+
+2. Backend
+backend/app/utils/reference_constants.py (new)
+CopySOURCE_PLATFORMS = ("nsp", "ssp_karnataka", "state_portal", "central_ministry", "university",
+                    "buddy4study", "vidyasaarathi", "other_official")
+OPEN_STATUSES = ("open", "closing_soon", "closed", "upcoming")
+CLOSING_SOON_DAYS = 15
+GENDERS = ("Female", "Male", "Transgender", "Prefer not to say")
+# Central categories plus Karnataka backward-class categories used on SSP.
+SOCIAL_CATEGORIES = ("General", "EWS", "OBC", "SC", "ST", "Category-I", "Category-IIA", "Category-IIB",
+                     "Category-IIIA", "Category-IIIB", "Other")
+ACADEMIC_YEAR_SEMESTERS = {y: (2 * y - 1, 2 * y) for y in range(1, 7)}
+SCHEME_STATUSES = ("unverified", "verified", "needs_review")
+backend/migrations/versions/0002_profile_ref_vtu.py (new)
+Put this next to your 0001_initial_schema.py. Set down_revision to the revision string in that file. Columns are only added if they don't already exist, and no existing rows are touched.
+
+Copy"""reference data, VTU schemes, calculator history, profile + scholarship discovery fields"""
+from alembic import op
+import sqlalchemy as sa
+
+revision = "0002_profile_ref_vtu"
+down_revision = "0001"  # <-- must equal `revision` in 0001_initial_schema.py
+branch_labels = None
+depends_on = None
+
+PROFILE_COLS = [
+    sa.Column("address", sa.String(300)), sa.Column("taluk", sa.String(120)), sa.Column("city", sa.String(120)),
+    sa.Column("admission_year", sa.SmallInteger), sa.Column("current_academic_year", sa.SmallInteger),
+    sa.Column("academic_cgpa", sa.Numeric(4, 2)), sa.Column("academic_percentage", sa.Numeric(5, 2)),
+    sa.Column("avatar_path", sa.String(255)),
+    sa.Column("district_id", sa.Integer), sa.Column("taluk_id", sa.Integer), sa.Column("university_id", sa.Integer),
+    sa.Column("college_id", sa.Integer), sa.Column("degree_id", sa.Integer), sa.Column("branch_id", sa.Integer),
+]
+PROFILE_FKS = {"district_id": "ref_districts", "taluk_id": "ref_taluks", "university_id": "ref_universities",
+               "college_id": "ref_colleges", "degree_id": "ref_degrees", "branch_id": "ref_branches"}
+SCHOLARSHIP_COLS = [
+    sa.Column("district", sa.String(120)), sa.Column("source_platform", sa.String(30)),
+    sa.Column("application_process", sa.Text), sa.Column("course_requirements", sa.Text),
+    sa.Column("is_archived", sa.Boolean, nullable=False, server_default=sa.false()),
+    sa.Column("archived_at", sa.DateTime),
+]
+
+
+def _existing(table):
+    return {c["name"] for c in sa.inspect(op.get_bind()).get_columns(table)}
+
+
+def _add(table, cols):
+    have, added = _existing(table), []
+    for col in cols:
+        if col.name not in have:
+            op.add_column(table, col)
+            added.append(col.name)
+    return added
+
+
+def upgrade():
+    op.create_table("ref_districts",
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("state", sa.String(80), nullable=False, index=True),
+        sa.Column("name", sa.String(120), nullable=False),
+        sa.Column("former_name", sa.String(120)), sa.Column("lgd_code", sa.String(20)),
+        sa.Column("source", sa.String(255)),
+        sa.UniqueConstraint("state", "name", name="uq_district_state_name"))
+    op.create_table("ref_taluks",
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("district_id", sa.Integer, sa.ForeignKey("ref_districts.id", ondelete="CASCADE"), nullable=False, index=True),
+        sa.Column("name", sa.String(120), nullable=False), sa.Column("lgd_code", sa.String(20)),
+        sa.UniqueConstraint("district_id", "name", name="uq_taluk_district_name"))
+    op.create_table("ref_universities",
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("name", sa.String(255), nullable=False, unique=True),
+        sa.Column("short_name", sa.String(40)), sa.Column("state", sa.String(80), index=True),
+        sa.Column("aishe_code", sa.String(30), unique=True), sa.Column("university_type", sa.String(80)),
+        sa.Column("source_url", sa.String(500)),
+        sa.Column("is_verified", sa.Boolean, nullable=False, server_default=sa.false()))
+    op.create_table("ref_colleges",
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("university_id", sa.Integer, sa.ForeignKey("ref_universities.id", ondelete="SET NULL"), index=True),
+        sa.Column("name", sa.String(255), nullable=False),
+        sa.Column("college_code", sa.String(30)), sa.Column("aishe_code", sa.String(30), index=True),
+        sa.Column("district_id", sa.Integer, sa.ForeignKey("ref_districts.id", ondelete="SET NULL"), index=True),
+        sa.Column("city", sa.String(120)), sa.Column("source_url", sa.String(500)),
+        sa.Column("is_verified", sa.Boolean, nullable=False, server_default=sa.false()),
+        sa.UniqueConstraint("university_id", "name", name="uq_college_university_name"))
+    op.create_table("ref_degrees",
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("name", sa.String(120), nullable=False, unique=True),
+        sa.Column("education_level", sa.String(40)))
+    op.create_table("ref_branches",
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("degree_id", sa.Integer, sa.ForeignKey("ref_degrees.id", ondelete="CASCADE"), nullable=False, index=True),
+        sa.Column("name", sa.String(160), nullable=False),
+        sa.UniqueConstraint("degree_id", "name", name="uq_branch_degree_name"))
+    op.create_table("academic_schemes",
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("university_id", sa.Integer, sa.ForeignKey("ref_universities.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("code", sa.String(40), nullable=False), sa.Column("name", sa.String(160), nullable=False),
+        sa.Column("regulation_title", sa.String(255)), sa.Column("regulation_url", sa.String(500)),
+        sa.Column("max_total_marks", sa.Numeric(6, 2), nullable=False, server_default="100"),
+        sa.Column("max_grade_point", sa.Numeric(4, 2), nullable=False, server_default="10"),
+        sa.Column("cie_max", sa.Numeric(6, 2)), sa.Column("see_max", sa.Numeric(6, 2)),
+        sa.Column("cie_min_pass", sa.Numeric(6, 2)), sa.Column("see_min_pass", sa.Numeric(6, 2)),
+        sa.Column("total_min_pass", sa.Numeric(6, 2)),
+        sa.Column("decimal_places", sa.SmallInteger, nullable=False, server_default="2"),
+        sa.Column("rounding", sa.String(12), nullable=False, server_default="half_up"),
+        sa.Column("marks_rounding", sa.String(12), nullable=False, server_default="none"),
+        sa.Column("fail_credits_in_denominator", sa.Boolean, nullable=False, server_default=sa.true()),
+        sa.Column("percentage_formula", sa.JSON), sa.Column("classification", sa.JSON), sa.Column("notes", sa.Text),
+        sa.Column("verification_status", sa.String(20), nullable=False, server_default="unverified", index=True),
+        sa.Column("verified_at", sa.DateTime),
+        sa.Column("verified_by_id", sa.Integer, sa.ForeignKey("users.id", ondelete="SET NULL")),
+        sa.Column("is_published", sa.Boolean, nullable=False, server_default=sa.false(), index=True),
+        sa.Column("created_at", sa.DateTime, nullable=False), sa.Column("updated_at", sa.DateTime, nullable=False),
+        sa.UniqueConstraint("university_id", "code", name="uq_scheme_university_code"))
+    op.create_table("scheme_grade_bands",
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("scheme_id", sa.Integer, sa.ForeignKey("academic_schemes.id", ondelete="CASCADE"), nullable=False, index=True),
+        sa.Column("label", sa.String(8), nullable=False),
+        sa.Column("min_marks", sa.Numeric(6, 2)), sa.Column("max_marks", sa.Numeric(6, 2)),
+        sa.Column("grade_point", sa.Numeric(4, 2), nullable=False),
+        sa.Column("is_pass", sa.Boolean, nullable=False), sa.Column("is_absent", sa.Boolean, nullable=False, server_default=sa.false()),
+        sa.Column("sort_order", sa.SmallInteger, nullable=False, server_default="0"),
+        sa.UniqueConstraint("scheme_id", "label", name="uq_band_scheme_label"))
+    op.create_table("curriculum_courses",
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("scheme_id", sa.Integer, sa.ForeignKey("academic_schemes.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("branch_id", sa.Integer, sa.ForeignKey("ref_branches.id", ondelete="SET NULL")),
+        sa.Column("semester", sa.SmallInteger, nullable=False),
+        sa.Column("course_code", sa.String(20), nullable=False), sa.Column("course_title", sa.String(255), nullable=False),
+        sa.Column("credits", sa.Numeric(4, 1), nullable=False), sa.Column("source_url", sa.String(500)),
+        sa.UniqueConstraint("scheme_id", "branch_id", "semester", "course_code", name="uq_curriculum_course"))
+    op.create_index("ix_curriculum_scheme_sem", "curriculum_courses", ["scheme_id", "semester"])
+    op.create_table("calculator_history",
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("user_id", sa.Integer, sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("kind", sa.String(10), nullable=False),
+        sa.Column("scheme_id", sa.Integer, sa.ForeignKey("academic_schemes.id", ondelete="SET NULL")),
+        sa.Column("semester", sa.SmallInteger), sa.Column("label", sa.String(120)),
+        sa.Column("input", sa.JSON, nullable=False), sa.Column("result", sa.JSON, nullable=False),
+        sa.Column("created_at", sa.DateTime, nullable=False))
+    op.create_index("ix_calc_history_user_created", "calculator_history", ["user_id", "created_at"])
+
+    added = _add("student_profiles", PROFILE_COLS)
+    for col, table in PROFILE_FKS.items():
+        if col in added:
+            op.create_foreign_key(f"fk_profile_{col}", "student_profiles", table, [col], ["id"], ondelete="SET NULL")
+            op.create_index(f"ix_profile_{col}", "student_profiles", [col])
+
+    added_s = _add("scholarships", SCHOLARSHIP_COLS)
+    for col in ("source_platform", "district", "is_archived"):
+        if col in added_s:
+            op.create_index(f"ix_scholarships_{col}", "scholarships", [col])
+
+
+def downgrade():
+    have = _existing("scholarships")
+    for col in ("source_platform", "district", "is_archived"):
+        if col in have:
+            op.drop_index(f"ix_scholarships_{col}", table_name="scholarships")
+    for c in SCHOLARSHIP_COLS:
+        if c.name in have:
+            op.drop_column("scholarships", c.name)
+    have_p = _existing("student_profiles")
+    for col in PROFILE_FKS:
+        if col in have_p:
+            op.drop_constraint(f"fk_profile_{col}", "student_profiles", type_="foreignkey")
+            op.drop_index(f"ix_profile_{col}", table_name="student_profiles")
+    for c in PROFILE_COLS:
+        if c.name in have_p:
+            op.drop_column("student_profiles", c.name)
+    for t in ("calculator_history", "curriculum_courses", "scheme_grade_bands", "academic_schemes",
+              "ref_branches", "ref_degrees", "ref_colleges", "ref_universities", "ref_taluks", "ref_districts"):
+        op.drop_table(t)
+Copy
+backend/app/models/reference.py (new)
+Copyfrom app.extensions import db
+
+
+class District(db.Model):
+    __tablename__ = "ref_districts"
+    __table_args__ = (db.UniqueConstraint("state", "name", name="uq_district_state_name"),)
+    id = db.Column(db.Integer, primary_key=True)
+    state = db.Column(db.String(80), nullable=False, index=True)
+    name = db.Column(db.String(120), nullable=False)
+    former_name = db.Column(db.String(120))
+    lgd_code = db.Column(db.String(20))
+    source = db.Column(db.String(255))
+
+    def to_dict(self):
+        return {"id": self.id, "state": self.state, "name": self.name, "former_name": self.former_name,
+                "lgd_code": self.lgd_code, "source": self.source}
+
+
+class Taluk(db.Model):
+    __tablename__ = "ref_taluks"
+    __table_args__ = (db.UniqueConstraint("district_id", "name", name="uq_taluk_district_name"),)
+    id = db.Column(db.Integer, primary_key=True)
+    district_id = db.Column(db.Integer, db.ForeignKey("ref_districts.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = db.Column(db.String(120), nullable=False)
+    lgd_code = db.Column(db.String(20))
+    district = db.relationship("District")
+
+    def to_dict(self):
+        return {"id": self.id, "district_id": self.district_id, "name": self.name, "lgd_code": self.lgd_code}
+
+
+class University(db.Model):
+    __tablename__ = "ref_universities"
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), nullable=False, unique=True)
+    short_name = db.Column(db.String(40))
+    state = db.Column(db.String(80), index=True)
+    aishe_code = db.Column(db.String(30), unique=True)
+    university_type = db.Column(db.String(80))
+    source_url = db.Column(db.String(500))
+    is_verified = db.Column(db.Boolean, nullable=False, default=False)
+
+    def to_dict(self):
+        return {"id": self.id, "name": self.name, "short_name": self.short_name, "state": self.state,
+                "aishe_code": self.aishe_code, "university_type": self.university_type,
+                "source_url": self.source_url, "is_verified": self.is_verified}
+
+
+class College(db.Model):
+    __tablename__ = "ref_colleges"
+    __table_args__ = (db.UniqueConstraint("university_id", "name", name="uq_college_university_name"),)
+    id = db.Column(db.Integer, primary_key=True)
+    university_id = db.Column(db.Integer, db.ForeignKey("ref_universities.id", ondelete="SET NULL"), index=True)
+    name = db.Column(db.String(255), nullable=False)
+    college_code = db.Column(db.String(30))
+    aishe_code = db.Column(db.String(30), index=True)
+    district_id = db.Column(db.Integer, db.ForeignKey("ref_districts.id", ondelete="SET NULL"), index=True)
+    city = db.Column(db.String(120))
+    source_url = db.Column(db.String(500))
+    is_verified = db.Column(db.Boolean, nullable=False, default=False)
+
+    def to_dict(self):
+        return {"id": self.id, "university_id": self.university_id, "name": self.name,
+                "college_code": self.college_code, "aishe_code": self.aishe_code, "district_id": self.district_id,
+                "city": self.city, "source_url": self.source_url, "is_verified": self.is_verified}
+
+
+class Degree(db.Model):
+    __tablename__ = "ref_degrees"
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False, unique=True)
+    education_level = db.Column(db.String(40))
+
+    def to_dict(self):
+        return {"id": self.id, "name": self.name, "education_level": self.education_level}
+
+
+class Branch(db.Model):
+    __tablename__ = "ref_branches"
+    __table_args__ = (db.UniqueConstraint("degree_id", "name", name="uq_branch_degree_name"),)
+    id = db.Column(db.Integer, primary_key=True)
+    degree_id = db.Column(db.Integer, db.ForeignKey("ref_degrees.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = db.Column(db.String(160), nullable=False)
+
+    def to_dict(self):
+        return {"id": self.id, "degree_id": self.degree_id, "name": self.name}
+Copy
+backend/app/models/vtu.py (new)
+Copyfrom app.extensions import db
+from app.utils.timeutils import utcnow
+
+
+class AcademicScheme(db.Model):
+    __tablename__ = "academic_schemes"
+    __table_args__ = (db.UniqueConstraint("university_id", "code", name="uq_scheme_university_code"),)
+    id = db.Column(db.Integer, primary_key=True)
+    university_id = db.Column(db.Integer, db.ForeignKey("ref_universities.id", ondelete="CASCADE"), nullable=False)
+    code = db.Column(db.String(40), nullable=False)
+    name = db.Column(db.String(160), nullable=False)
+    regulation_title = db.Column(db.String(255))
+    regulation_url = db.Column(db.String(500))
+    max_total_marks = db.Column(db.Numeric(6, 2), nullable=False, default=100)
+    max_grade_point = db.Column(db.Numeric(4, 2), nullable=False, default=10)
+    cie_max = db.Column(db.Numeric(6, 2))
+    see_max = db.Column(db.Numeric(6, 2))
+    cie_min_pass = db.Column(db.Numeric(6, 2))
+    see_min_pass = db.Column(db.Numeric(6, 2))
+    total_min_pass = db.Column(db.Numeric(6, 2))
+    decimal_places = db.Column(db.SmallInteger, nullable=False, default=2)
+    rounding = db.Column(db.String(12), nullable=False, default="half_up")
+    marks_rounding = db.Column(db.String(12), nullable=False, default="none")
+    fail_credits_in_denominator = db.Column(db.Boolean, nullable=False, default=True)
+    percentage_formula = db.Column(db.JSON)
+    classification = db.Column(db.JSON)
+    notes = db.Column(db.Text)
+    verification_status = db.Column(db.String(20), nullable=False, default="unverified", index=True)
+    verified_at = db.Column(db.DateTime)
+    verified_by_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"))
+    is_published = db.Column(db.Boolean, nullable=False, default=False, index=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+    updated_at = db.Column(db.DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    university = db.relationship("University")
+    bands = db.relationship("SchemeGradeBand", cascade="all, delete-orphan",
+                            order_by="SchemeGradeBand.sort_order", back_populates="scheme")
+
+    @property
+    def student_visible(self):
+        return self.is_published and self.verification_status == "verified"
+
+
+class SchemeGradeBand(db.Model):
+    __tablename__ = "scheme_grade_bands"
+    __table_args__ = (db.UniqueConstraint("scheme_id", "label", name="uq_band_scheme_label"),)
+    id = db.Column(db.Integer, primary_key=True)
+    scheme_id = db.Column(db.Integer, db.ForeignKey("academic_schemes.id", ondelete="CASCADE"), nullable=False, index=True)
+    label = db.Column(db.String(8), nullable=False)
+    min_marks = db.Column(db.Numeric(6, 2))
+    max_marks = db.Column(db.Numeric(6, 2))
+    grade_point = db.Column(db.Numeric(4, 2), nullable=False)
+    is_pass = db.Column(db.Boolean, nullable=False)
+    is_absent = db.Column(db.Boolean, nullable=False, default=False)
+    sort_order = db.Column(db.SmallInteger, nullable=False, default=0)
+    scheme = db.relationship("AcademicScheme", back_populates="bands")
+
+
+class CurriculumCourse(db.Model):
+    __tablename__ = "curriculum_courses"
+    __table_args__ = (db.UniqueConstraint("scheme_id", "branch_id", "semester", "course_code", name="uq_curriculum_course"),
+                      db.Index("ix_curriculum_scheme_sem", "scheme_id", "semester"))
+    id = db.Column(db.Integer, primary_key=True)
+    scheme_id = db.Column(db.Integer, db.ForeignKey("academic_schemes.id", ondelete="CASCADE"), nullable=False)
+    branch_id = db.Column(db.Integer, db.ForeignKey("ref_branches.id", ondelete="SET NULL"))
+    semester = db.Column(db.SmallInteger, nullable=False)
+    course_code = db.Column(db.String(20), nullable=False)
+    course_title = db.Column(db.String(255), nullable=False)
+    credits = db.Column(db.Numeric(4, 1), nullable=False)
+    source_url = db.Column(db.String(500))
+
+
+class CalculatorHistory(db.Model):
+    __tablename__ = "calculator_history"
+    __table_args__ = (db.Index("ix_calc_history_user_created", "user_id", "created_at"),)
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    kind = db.Column(db.String(10), nullable=False)  # sgpa | cgpa
+    scheme_id = db.Column(db.Integer, db.ForeignKey("academic_schemes.id", ondelete="SET NULL"))
+    semester = db.Column(db.SmallInteger)
+    label = db.Column(db.String(120))
+    input = db.Column(db.JSON, nullable=False)
+    result = db.Column(db.JSON, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+
+    def to_dict(self):
+        return {"id": self.id, "kind": self.kind, "scheme_id": self.scheme_id, "semester": self.semester,
+                "label": self.label, "input": self.input, "result": self.result,
+                "created_at": self.created_at.isoformat() if self.created_at else None}
+Copy
+Model patches (existing files)
+In backend/app/models/__init__.py, add:
+
+Copyfrom app.models.reference import District, Taluk, University, College, Degree, Branch  # noqa: F401
+from app.models.vtu import AcademicScheme, SchemeGradeBand, CurriculumCourse, CalculatorHistory  # noqa: F401
+Add these columns inside the existing StudentProfile class:
+
+Copy    address = db.Column(db.String(300))
+    taluk = db.Column(db.String(120))
+    city = db.Column(db.String(120))
+    admission_year = db.Column(db.SmallInteger)
+    current_academic_year = db.Column(db.SmallInteger)
+    academic_cgpa = db.Column(db.Numeric(4, 2))
+    academic_percentage = db.Column(db.Numeric(5, 2))
+    avatar_path = db.Column(db.String(255))
+    district_id = db.Column(db.Integer, db.ForeignKey("ref_districts.id", ondelete="SET NULL"), index=True)
+    taluk_id = db.Column(db.Integer, db.ForeignKey("ref_taluks.id", ondelete="SET NULL"), index=True)
+    university_id = db.Column(db.Integer, db.ForeignKey("ref_universities.id", ondelete="SET NULL"), index=True)
+    college_id = db.Column(db.Integer, db.ForeignKey("ref_colleges.id", ondelete="SET NULL"), index=True)
+    degree_id = db.Column(db.Integer, db.ForeignKey("ref_degrees.id", ondelete="SET NULL"), index=True)
+    branch_id = db.Column(db.Integer, db.ForeignKey("ref_branches.id", ondelete="SET NULL"), index=True)
+Add these columns inside the existing Scholarship class:
+
+Copy    district = db.Column(db.String(120), index=True)
+    source_platform = db.Column(db.String(30), index=True)
+    application_process = db.Column(db.Text)
+    course_requirements = db.Column(db.Text)
+    is_archived = db.Column(db.Boolean, nullable=False, default=False, index=True)
+    archived_at = db.Column(db.DateTime)
+backend/app/services/audit_adapter.py (new)
+I couldn't see the signature of your log_action, so this adapter passes only the arguments it accepts.
+
+Copyimport inspect
+
+from app.services.audit import log_action
+
+
+def audit(admin, action, entity_type=None, entity_id=None, details=None):
+    params = inspect.signature(log_action).parameters
+    candidates = {"actor": admin, "admin": admin, "user": admin, "action": action,
+                  "entity_type": entity_type, "target_type": entity_type,
+                  "entity_id": entity_id, "target_id": entity_id, "details": details, "meta": details}
+    return log_action(**{k: v for k, v in candidates.items() if k in params})
+backend/app/services/vtu_calc.py (new: calculation only, no database)
+Copy"""Scheme-driven SGPA/CGPA arithmetic. All grading facts come from SchemeRules, never from this file."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation
+
+ROUNDING = {"half_up": ROUND_HALF_UP, "truncate": ROUND_DOWN}
+MARKS_ROUNDING = {"none": None, "ceil": ROUND_CEILING, "half_up": ROUND_HALF_UP}
+
+
+class CalcError(ValueError):
+    def __init__(self, errors: dict):
+        super().__init__("Please correct the highlighted fields")
+        self.errors = errors
+
+
+@dataclass(frozen=True)
+class Band:
+    label: str
+    grade_point: Decimal
+    is_pass: bool
+    min_marks: Decimal | None = None
+    max_marks: Decimal | None = None
+    is_absent: bool = False
+
+
+@dataclass(frozen=True)
+class SchemeRules:
+    bands: tuple
+    max_total_marks: Decimal = Decimal("100")
+    max_grade_point: Decimal = Decimal("10")
+    cie_max: Decimal | None = None
+    see_max: Decimal | None = None
+    cie_min_pass: Decimal | None = None
+    see_min_pass: Decimal | None = None
+    total_min_pass: Decimal | None = None
+    decimal_places: int = 2
+    rounding: str = "half_up"
+    marks_rounding: str = "none"
+    fail_credits_in_denominator: bool = True
+    max_subject_credits: Decimal = Decimal("20")
+
+
+def s(d: Decimal | None) -> str | None:
+    return None if d is None else format(d.normalize(), "f")
+
+
+def round_to(value: Decimal, places: int, mode: str) -> Decimal:
+    return value.quantize(Decimal(1).scaleb(-places), rounding=ROUNDING.get(mode, ROUND_HALF_UP))
+
+
+def num(value, path, errors, *, lo=None, hi=None, required=True):
+    if value is None or (isinstance(value, str) and not value.strip()):
+        if required:
+            errors[path] = "Required"
+        return None
+    if isinstance(value, bool):
+        errors[path] = "Must be a number"
+        return None
+    try:
+        d = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        errors[path] = "Must be a number"
+        return None
+    if not d.is_finite():
+        errors[path] = "Must be a number"
+        return None
+    if lo is not None and d < Decimal(str(lo)):
+        errors[path] = f"Must be at least {lo}"
+        return None
+    if hi is not None and d > Decimal(str(hi)):
+        errors[path] = f"Must be at most {s(Decimal(str(hi)))}"
+        return None
+    return d
+
+
+def _fail_band(rules):
+    fails = [b for b in rules.bands if not b.is_pass and not b.is_absent]
+    if not fails:
+        raise CalcError({"scheme": "The scheme has no failing grade configured"})
+    return min(fails, key=lambda b: b.grade_point)
+
+
+def _absent_band(rules):
+    return next((b for b in rules.bands if b.is_absent), None) or _fail_band(rules)
+
+
+def band_for_marks(rules, marks):
+    for b in rules.bands:
+        if not b.is_absent and b.min_marks is not None and b.max_marks is not None and b.min_marks <= marks <= b.max_marks:
+            return b
+    return None
+
+
+def _grade_from_marks(rules, subj, p, errors):
+    split = subj.get("cie") not in (None, "") or subj.get("see") not in (None, "")
+    cie = see = None
+    if split:
+        if rules.cie_max is None or rules.see_max is None:
+            errors[f"{p}.cie"] = "This scheme has no CIE/SEE split configured. Enter total marks instead."
+            return None, None, None
+        cie = num(subj.get("cie"), f"{p}.cie", errors, lo=0, hi=rules.cie_max)
+        see = num(subj.get("see"), f"{p}.see", errors, lo=0, hi=rules.see_max)
+        if cie is None or see is None:
+            return None, None, None
+        total = cie + see
+    else:
+        total = num(subj.get("total"), f"{p}.total", errors, lo=0, hi=rules.max_total_marks)
+        if total is None:
+            return None, None, None
+    mode = MARKS_ROUNDING.get(rules.marks_rounding)
+    graded = total.quantize(Decimal(1), rounding=mode) if mode else total
+    reasons = []
+    if cie is not None and rules.cie_min_pass is not None and cie < rules.cie_min_pass:
+        reasons.append(f"CIE {s(cie)} is below the minimum {s(rules.cie_min_pass)}")
+    if see is not None and rules.see_min_pass is not None and see < rules.see_min_pass:
+        reasons.append(f"SEE {s(see)} is below the minimum {s(rules.see_min_pass)}")
+    if rules.total_min_pass is not None and graded < rules.total_min_pass:
+        reasons.append(f"Total {s(graded)} is below the minimum {s(rules.total_min_pass)}")
+    if reasons:
+        return _fail_band(rules), total, "; ".join(reasons)
+    band = band_for_marks(rules, graded)
+    if band is None:
+        errors[f"{p}.total"] = ("These marks fall between grade bands and this scheme has no marks-rounding rule "
+                                "configured. Select the grade from your marks card instead."
+                                if graded != graded.to_integral_value() else "No grade band covers these marks")
+        return None, None, None
+    return band, total, None
+
+
+def compute_sgpa(rules: SchemeRules, subjects) -> dict:
+    if not isinstance(subjects, list) or not subjects:
+        raise CalcError({"subjects": "Add at least one subject"})
+    if len(subjects) > 40:
+        raise CalcError({"subjects": "At most 40 subjects per semester"})
+    labels = {b.label.upper(): b for b in rules.bands}
+    errors, rows, codes = {}, [], set()
+    for i, subj in enumerate(subjects):
+        p = f"subjects[{i}]"
+        if not isinstance(subj, dict):
+            errors[p] = "Invalid subject"
+            continue
+        name = str(subj.get("name") or "").strip()[:160]
+        code = str(subj.get("code") or "").strip().upper()[:20]
+        if not name and not code:
+            errors[f"{p}.name"] = "Enter a subject name or code"
+        if code:
+            if code in codes:
+                errors[f"{p}.code"] = "This subject code is entered twice"
+            codes.add(code)
+        credits = num(subj.get("credits"), f"{p}.credits", errors, lo=0, hi=rules.max_subject_credits)
+        if credits is not None and (credits * 2) % 1 != 0:
+            errors[f"{p}.credits"] = "Credits must be a whole or half number"
+            credits = None
+        band, total, note = None, None, None
+        mode = subj.get("mode") or "grade"
+        if subj.get("absent"):
+            band, note = _absent_band(rules), "Absent"
+        elif mode == "grade":
+            g = str(subj.get("grade") or "").strip().upper()
+            if not g:
+                errors[f"{p}.grade"] = "Select a grade"
+            elif g not in labels:
+                errors[f"{p}.grade"] = f"'{g}' is not a grade in this scheme"
+            else:
+                band = labels[g]
+        elif mode == "marks":
+            band, total, note = _grade_from_marks(rules, subj, p, errors)
+        else:
+            errors[f"{p}.mode"] = "Choose grade or marks"
+        if band is None or credits is None:
+            continue
+        counted = credits > 0 and (band.is_pass or rules.fail_credits_in_denominator)
+        rows.append({"name": name, "code": code, "credits": credits, "grade": band.label,
+                     "grade_point": band.grade_point, "credit_points": credits * band.grade_point,
+                     "passed": band.is_pass, "absent": bool(subj.get("absent")), "total_marks": total,
+                     "note": note, "counted": counted})
+    if errors:
+        raise CalcError(errors)
+    denom = sum((r["credits"] for r in rows if r["counted"]), Decimal(0))
+    points = sum((r["credit_points"] for r in rows if r["counted"]), Decimal(0))
+    if denom == 0:
+        raise CalcError({"subjects": "Total credits must be greater than zero"})
+    raw = points / denom
+    failed = [r for r in rows if not r["passed"]]
+    assumptions = []
+    if any(r["credits"] == 0 for r in rows):
+        assumptions.append("Zero-credit subjects are listed but not included in the SGPA.")
+    if failed:
+        assumptions.append("Failed or absent subjects carry 0 grade points; their credits are "
+                           + ("included in" if rules.fail_credits_in_denominator else "excluded from")
+                           + " total credits, as configured for this scheme.")
+    return {
+        "rows": [{**r, "credits": s(r["credits"]), "grade_point": s(r["grade_point"]),
+                  "credit_points": s(r["credit_points"]), "total_marks": s(r["total_marks"])} for r in rows],
+        "registered_credits": s(sum((r["credits"] for r in rows), Decimal(0))),
+        "total_credits": s(denom), "total_credit_points": s(points),
+        "sgpa_exact": str(raw), "sgpa": str(round_to(raw, rules.decimal_places, rules.rounding)),
+        "all_passed": not failed,
+        "result_status": "Passed all subjects" if not failed else f"Not cleared: {len(failed)} subject(s)",
+        "assumptions": assumptions,
+    }
+
+
+def compute_manual_sgpa(subjects, max_grade_point=Decimal("10")) -> dict:
+    """Student-supplied grade points (no scheme). Standard credit-weighted formula, clearly labelled."""
+    if not isinstance(subjects, list) or not subjects:
+        raise CalcError({"subjects": "Add at least one subject"})
+    errors, rows = {}, []
+    for i, subj in enumerate(subjects[:40]):
+        p = f"subjects[{i}]"
+        name = str((subj or {}).get("name") or (subj or {}).get("code") or "").strip()[:160]
+        if not name:
+            errors[f"{p}.name"] = "Enter a subject name or code"
+        c = num((subj or {}).get("credits"), f"{p}.credits", errors, lo=0, hi=20)
+        gp = num((subj or {}).get("grade_point"), f"{p}.grade_point", errors, lo=0, hi=max_grade_point)
+        if c is not None and gp is not None:
+            rows.append({"name": name, "code": str(subj.get("code") or "").upper()[:20], "credits": c,
+                         "grade": None, "grade_point": gp, "credit_points": c * gp, "passed": None, "counted": c > 0})
+    if errors:
+        raise CalcError(errors)
+    denom = sum((r["credits"] for r in rows if r["counted"]), Decimal(0))
+    if denom == 0:
+        raise CalcError({"subjects": "Total credits must be greater than zero"})
+    points = sum((r["credit_points"] for r in rows if r["counted"]), Decimal(0))
+    raw = points / denom
+    return {"rows": [{**r, "credits": s(r["credits"]), "grade_point": s(r["grade_point"]),
+                      "credit_points": s(r["credit_points"])} for r in rows],
+            "registered_credits": s(denom), "total_credits": s(denom), "total_credit_points": s(points),
+            "sgpa_exact": str(raw), "sgpa": str(round_to(raw, 2, "half_up")), "all_passed": None,
+            "result_status": "Not determined (manual grade points)",
+            "assumptions": ["Manual mode: SGPA = Σ(credits × grade point) ÷ Σ credits using the grade points you "
+                            "entered. Pass/fail and scheme rules were not applied; rounded half-up to 2 decimals."]}
+
+
+def compute_cgpa(semesters, *, max_grade_point=Decimal("10"), decimal_places=2, rounding="half_up",
+                 percentage_formula=None, classification=None) -> dict:
+    if not isinstance(semesters, list) or not semesters:
+        raise CalcError({"semesters": "Add at least one semester"})
+    errors, rows, seen = {}, [], set()
+    for i, sem in enumerate(semesters[:12]):
+        p = f"semesters[{i}]"
+        sem = sem if isinstance(sem, dict) else {}
+        n = num(sem.get("semester"), f"{p}.semester", errors, lo=1, hi=12)
+        if n is not None:
+            if n != n.to_integral_value():
+                errors[f"{p}.semester"] = "Semester must be a whole number"
+                n = None
+            elif int(n) in seen:
+                errors[f"{p}.semester"] = "Semester entered twice"
+            else:
+                seen.add(int(n))
+        sg = num(sem.get("sgpa"), f"{p}.sgpa", errors, lo=0, hi=max_grade_point)
+        cr = num(sem.get("credits"), f"{p}.credits", errors, lo=Decimal("0.5"), hi=60)
+        if None not in (n, sg, cr):
+            rows.append({"semester": int(n), "sgpa": sg, "credits": cr, "credit_points": sg * cr})
+    if errors:
+        raise CalcError(errors)
+    rows.sort(key=lambda r: r["semester"])
+    tc = sum((r["credits"] for r in rows), Decimal(0))
+    tp = sum((r["credit_points"] for r in rows), Decimal(0))
+    raw = tp / tc
+    cgpa = round_to(raw, decimal_places, rounding)
+    assumptions = ["CGPA = Σ(semester SGPA × semester credits) ÷ Σ semester credits (credit-weighted, not a simple average).",
+                   "SGPAs you enter are usually already rounded, so the result can differ slightly from a CGPA "
+                   "computed from subject-level credit points."]
+    missing = sorted(set(range(1, max(seen) + 1)) - seen)
+    if missing:
+        assumptions.append(f"Semester(s) {', '.join(map(str, missing))} not entered; CGPA covers entered semesters only.")
+    result = {"rows": [{k: (s(v) if isinstance(v, Decimal) else v) for k, v in r.items()} for r in rows],
+              "total_credits": s(tc), "total_credit_points": s(tp), "cgpa_exact": str(raw), "cgpa": str(cgpa),
+              "percentage": None, "percentage_basis": None, "classification": None, "assumptions": assumptions}
+    if percentage_formula and percentage_formula.get("type") == "linear" and percentage_formula.get("source_url"):
+        pct = (cgpa - Decimal(str(percentage_formula.get("subtract", 0)))) * Decimal(str(percentage_formula.get("multiply", 1)))
+        result["percentage"] = str(round_to(min(max(pct, Decimal(0)), Decimal(100)), 2, "half_up"))
+        result["percentage_basis"] = {"formula": f"(CGPA − {percentage_formula.get('subtract', 0)}) × {percentage_formula.get('multiply', 1)}",
+                                      "source_url": percentage_formula["source_url"], "applied_to": "rounded CGPA"}
+    for c in classification or []:
+        lo = Decimal(str(c.get("min", 0)))
+        hi = Decimal(str(c["max"])) if c.get("max") is not None else None
+        if cgpa >= lo and (hi is None or cgpa <= hi):
+            result["classification"] = c.get("label")
+            break
+    return result
+Copy
+backend/app/services/vtu.py (new)
+Copyimport csv
+import io
+import re
+from decimal import Decimal
+
+from marshmallow import Schema, ValidationError, fields, validate, validates_schema
+
+from app.extensions import db
+from app.models import AcademicScheme, Branch, CalculatorHistory, CurriculumCourse, SchemeGradeBand, University
+from app.services.audit_adapter import audit
+from app.services.vtu_calc import Band, SchemeRules, compute_cgpa, compute_manual_sgpa, compute_sgpa
+from app.utils.errors import BadRequest, NotFound
+from app.utils.timeutils import utcnow
+
+URL = re.compile(r"^https?://", re.I)
+
+
+def _d(v):
+    return None if v is None else Decimal(str(v))
+
+
+def rules_for(sc: AcademicScheme) -> SchemeRules:
+    return SchemeRules(
+        bands=tuple(Band(b.label, _d(b.grade_point), b.is_pass, _d(b.min_marks), _d(b.max_marks), b.is_absent) for b in sc.bands),
+        max_total_marks=_d(sc.max_total_marks) or Decimal(100), max_grade_point=_d(sc.max_grade_point) or Decimal(10),
+        cie_max=_d(sc.cie_max), see_max=_d(sc.see_max), cie_min_pass=_d(sc.cie_min_pass),
+        see_min_pass=_d(sc.see_min_pass), total_min_pass=_d(sc.total_min_pass),
+        decimal_places=sc.decimal_places or 2, rounding=sc.rounding or "half_up",
+        marks_rounding=sc.marks_rounding or "none", fail_credits_in_denominator=bool(sc.fail_credits_in_denominator))
+
+
+def _f(v):
+    return None if v is None else float(v)
+
+
+def scheme_dict(sc, detail=False):
+    out = {"id": sc.id, "code": sc.code, "name": sc.name, "university": sc.university.name if sc.university else None,
+           "university_id": sc.university_id, "verification_status": sc.verification_status,
+           "is_published": sc.is_published, "regulation_title": sc.regulation_title, "regulation_url": sc.regulation_url,
+           "verified_at": sc.verified_at.isoformat() if sc.verified_at else None}
+    if detail:
+        out["rules"] = {k: _f(getattr(sc, k)) for k in ("max_total_marks", "max_grade_point", "cie_max", "see_max",
+                                                         "cie_min_pass", "see_min_pass", "total_min_pass")}
+        out["rules"].update(decimal_places=sc.decimal_places, rounding=sc.rounding, marks_rounding=sc.marks_rounding,
+                            fail_credits_in_denominator=sc.fail_credits_in_denominator)
+        out["percentage_formula"] = sc.percentage_formula
+        out["classification"] = sc.classification
+        out["notes"] = sc.notes
+        out["bands"] = [{"label": b.label, "min_marks": _f(b.min_marks), "max_marks": _f(b.max_marks),
+                         "grade_point": _f(b.grade_point), "is_pass": b.is_pass, "is_absent": b.is_absent} for b in sc.bands]
+        sems = db.session.query(CurriculumCourse.semester).filter_by(scheme_id=sc.id).distinct().all()
+        br = (db.session.query(Branch).join(CurriculumCourse, CurriculumCourse.branch_id == Branch.id)
+              .filter(CurriculumCourse.scheme_id == sc.id).distinct().all())
+        out["curriculum"] = {"semesters": sorted(s[0] for s in sems), "branches": [b.to_dict() for b in br]}
+    return out
+
+
+def list_schemes(admin=False):
+    q = AcademicScheme.query
+    if not admin:
+        q = q.filter(AcademicScheme.is_published.is_(True), AcademicScheme.verification_status == "verified")
+    return [scheme_dict(s) for s in q.order_by(AcademicScheme.university_id, AcademicScheme.code.desc()).all()]
+
+
+def get_scheme(scheme_id, admin=False) -> AcademicScheme:
+    sc = db.session.get(AcademicScheme, scheme_id)
+    if not sc or (not admin and not sc.student_visible):
+        raise NotFound("Scheme not found or not yet verified")
+    return sc
+
+
+def curriculum(sc, semester=None, branch_id=None):
+    q = CurriculumCourse.query.filter_by(scheme_id=sc.id)
+    if semester:
+        q = q.filter_by(semester=semester)
+    if branch_id:
+        q = q.filter((CurriculumCourse.branch_id == branch_id) | CurriculumCourse.branch_id.is_(None))
+    return [{"id": c.id, "semester": c.semester, "course_code": c.course_code, "course_title": c.course_title,
+             "credits": float(c.credits), "branch_id": c.branch_id, "source_url": c.source_url}
+            for c in q.order_by(CurriculumCourse.semester, CurriculumCourse.course_code).all()]
+
+
+class SchemeSchema(Schema):
+    university_id = fields.Integer(required=True)
+    code = fields.String(required=True, validate=validate.Length(1, 40))
+    name = fields.String(required=True, validate=validate.Length(2, 160))
+    regulation_title = fields.String(allow_none=True, validate=validate.Length(max=255))
+    regulation_url = fields.String(allow_none=True, validate=validate.Regexp(URL, error="Must be an http(s) URL"))
+    max_total_marks = fields.Decimal(load_default=Decimal(100), validate=validate.Range(1, 1000))
+    max_grade_point = fields.Decimal(load_default=Decimal(10), validate=validate.Range(1, 100))
+    cie_max = fields.Decimal(allow_none=True, validate=validate.Range(0, 1000))
+    see_max = fields.Decimal(allow_none=True, validate=validate.Range(0, 1000))
+    cie_min_pass = fields.Decimal(allow_none=True, validate=validate.Range(0, 1000))
+    see_min_pass = fields.Decimal(allow_none=True, validate=validate.Range(0, 1000))
+    total_min_pass = fields.Decimal(allow_none=True, validate=validate.Range(0, 1000))
+    decimal_places = fields.Integer(load_default=2, validate=validate.Range(0, 4))
+    rounding = fields.String(load_default="half_up", validate=validate.OneOf(["half_up", "truncate"]))
+    marks_rounding = fields.String(load_default="none", validate=validate.OneOf(["none", "ceil", "half_up"]))
+    fail_credits_in_denominator = fields.Boolean(load_default=True)
+    percentage_formula = fields.Dict(allow_none=True)
+    classification = fields.List(fields.Dict(), allow_none=True)
+    notes = fields.String(allow_none=True, validate=validate.Length(max=5000))
+
+    @validates_schema
+    def check(self, data, **_):
+        if data.get("cie_max") is not None and data.get("see_max") is not None:
+            if data["cie_max"] + data["see_max"] != data.get("max_total_marks", Decimal(100)):
+                raise ValidationError("CIE max + SEE max must equal max total marks", "see_max")
+        pf = data.get("percentage_formula")
+        if pf:
+            if pf.get("type") != "linear":
+                raise ValidationError("Only {'type': 'linear', 'subtract', 'multiply', 'source_url'} is supported", "percentage_formula")
+            if pf.get("source_url") and not URL.match(str(pf["source_url"])):
+                raise ValidationError("source_url must be an http(s) URL", "percentage_formula")
+        for c in data.get("classification") or []:
+            if not c.get("label") or c.get("min") is None:
+                raise ValidationError("Each classification needs label and min", "classification")
+
+
+class BandSchema(Schema):
+    label = fields.String(required=True, validate=validate.Length(1, 8))
+    min_marks = fields.Decimal(allow_none=True)
+    max_marks = fields.Decimal(allow_none=True)
+    grade_point = fields.Decimal(required=True, validate=validate.Range(0, 100))
+    is_pass = fields.Boolean(required=True)
+    is_absent = fields.Boolean(load_default=False)
+
+
+def _needs_review(sc):
+    if sc.verification_status == "verified":
+        sc.verification_status, sc.is_published = "needs_review", False
+
+
+def save_scheme(admin, payload, sc=None):
+    data = SchemeSchema(partial=sc is not None).load(payload)
+    if "university_id" in data and not db.session.get(University, data["university_id"]):
+        raise ValidationError({"university_id": ["Unknown university"]})
+    creating = sc is None
+    if creating:
+        sc = AcademicScheme(verification_status="unverified", is_published=False)
+        db.session.add(sc)
+    else:
+        _needs_review(sc)
+    for k, v in data.items():
+        setattr(sc, k, v)
+    db.session.flush()
+    audit(admin, "academic_scheme.create" if creating else "academic_scheme.update", "academic_scheme", sc.id)
+    db.session.commit()
+    return sc
+
+
+def replace_bands(admin, sc, payload):
+    bands = BandSchema(many=True).load(payload if isinstance(payload, list) else [])
+    labels = [b["label"].strip().upper() for b in bands]
+    if len(set(labels)) != len(labels):
+        raise ValidationError({"bands": ["Grade labels must be unique"]})
+    if not any(b["is_pass"] for b in bands) or not any(not b["is_pass"] and not b["is_absent"] for b in bands):
+        raise ValidationError({"bands": ["Need at least one passing and one failing grade"]})
+    ranges = []
+    for b in bands:
+        if b["grade_point"] > sc.max_grade_point:
+            raise ValidationError({"bands": [f"{b['label']}: grade point exceeds scheme maximum"]})
+        if b["is_absent"]:
+            continue
+        lo, hi = b.get("min_marks"), b.get("max_marks")
+        if lo is None or hi is None or lo > hi or lo < 0 or hi > sc.max_total_marks:
+            raise ValidationError({"bands": [f"{b['label']}: marks range must be within 0–{sc.max_total_marks}"]})
+        ranges.append((lo, hi, b["label"]))
+    ranges.sort()
+    for (l1, h1, a), (l2, h2, b) in zip(ranges, ranges[1:]):
+        if l2 <= h1:
+            raise ValidationError({"bands": [f"Ranges of {a} and {b} overlap"]})
+    sc.bands.clear()
+    db.session.flush()
+    for i, b in enumerate(bands):
+        sc.bands.append(SchemeGradeBand(label=b["label"].strip().upper(), min_marks=b.get("min_marks"),
+                                        max_marks=b.get("max_marks"), grade_point=b["grade_point"],
+                                        is_pass=b["is_pass"], is_absent=b["is_absent"], sort_order=i))
+    _needs_review(sc)
+    audit(admin, "academic_scheme.bands", "academic_scheme", sc.id, {"count": len(bands)})
+    db.session.commit()
+    return sc
+
+
+def verify_scheme(admin, sc, notes=None):
+    if not sc.regulation_url:
+        raise BadRequest("Enter the official regulation URL before verifying", status=400, code="regulation_required")
+    if not sc.bands:
+        raise BadRequest("Configure grade bands before verifying", status=400, code="bands_required")
+    sc.verification_status, sc.verified_at, sc.verified_by_id = "verified", utcnow(), admin.id
+    if notes:
+        sc.notes = notes[:5000]
+    audit(admin, "academic_scheme.verify", "academic_scheme", sc.id)
+    db.session.commit()
+    return sc
+
+
+def set_published(admin, sc, flag: bool):
+    if flag and sc.verification_status != "verified":
+        raise BadRequest("Verify the scheme before publishing", status=400, code="not_verified")
+    sc.is_published = flag
+    audit(admin, "academic_scheme.publish" if flag else "academic_scheme.unpublish", "academic_scheme", sc.id)
+    db.session.commit()
+    return sc
+
+
+def import_curriculum(admin, sc, text: str):
+    reader = csv.DictReader(io.StringIO(text))
+    cols = {c.strip().lower() for c in (reader.fieldnames or [])}
+    need = {"semester", "course_code", "course_title", "credits"}
+    if not need <= cols:
+        raise BadRequest(f"CSV needs columns: {', '.join(sorted(need))} (optional: branch, source_url)", status=400)
+    created = updated = 0
+    errors = []
+    for n, raw in enumerate(reader, start=2):
+        row = {k.strip().lower(): (v or "").strip() for k, v in raw.items() if k}
+        try:
+            sem, credits = int(row["semester"]), Decimal(row["credits"])
+            if not 1 <= sem <= 12 or not Decimal(0) <= credits <= 20 or not row["course_code"] or not row["course_title"]:
+                raise ValueError("semester 1–12, credits 0–20, code and title required")
+            if row.get("source_url") and not URL.match(row["source_url"]):
+                raise ValueError("source_url must be http(s)")
+            branch_id = None
+            if row.get("branch"):
+                br = Branch.query.filter(Branch.name == row["branch"]).first()
+                if not br:
+                    raise ValueError(f"unknown branch '{row['branch']}'")
+                branch_id = br.id
+            code = row["course_code"].upper()[:20]
+            c = CurriculumCourse.query.filter_by(scheme_id=sc.id, branch_id=branch_id, semester=sem, course_code=code).first()
+            if c:
+                updated += 1
+            else:
+                c = CurriculumCourse(scheme_id=sc.id, branch_id=branch_id, semester=sem, course_code=code)
+                db.session.add(c)
+                created += 1
+            c.course_title, c.credits, c.source_url = row["course_title"][:255], credits, row.get("source_url") or None
+        except (ValueError, ArithmeticError) as exc:
+            errors.append({"row": n, "error": str(exc)})
+        if n > 5001:
+            errors.append({"row": n, "error": "row limit 5000 reached"})
+            break
+    audit(admin, "academic_scheme.curriculum_import", "academic_scheme", sc.id, {"created": created, "updated": updated})
+    db.session.commit()
+    return {"created": created, "updated": updated, "errors": errors[:100]}
+
+
+def _save(user, kind, scheme_id, semester, label, inp, result):
+    h = CalculatorHistory(user_id=user.id, kind=kind, scheme_id=scheme_id, semester=semester,
+                          label=(label or "")[:120] or None, input=inp, result=result)
+    db.session.add(h)
+    db.session.commit()
+    return h.id
+
+
+def run_sgpa(user, payload):
+    scheme_id = payload.get("scheme_id")
+    semester = payload.get("semester")
+    if semester not in (None, ""):
+        if not str(semester).isdigit() or not 1 <= int(semester) <= 12:
+            raise ValidationError({"semester": ["Semester must be 1–12"]})
+        semester = int(semester)
+    else:
+        semester = None
+    admin = getattr(user, "role", None) == "admin"
+    if scheme_id:
+        sc = get_scheme(int(scheme_id), admin=admin)
+        result = compute_sgpa(rules_for(sc), payload.get("subjects"))
+        result["scheme"] = {"id": sc.id, "name": sc.name, "code": sc.code, "verified": sc.verification_status == "verified",
+                            "regulation_url": sc.regulation_url}
+    else:
+        result = compute_manual_sgpa(payload.get("subjects"))
+        result["scheme"] = None
+    result["semester"] = semester
+    if payload.get("save"):
+        if not user:
+            raise BadRequest("Log in to save calculator history", status=401, code="unauthorized")
+        result["history_id"] = _save(user, "sgpa", scheme_id or None, semester, payload.get("label"),
+                                     {"subjects": payload.get("subjects")}, result)
+    return result
+
+
+def run_cgpa(user, payload):
+    scheme_id = payload.get("scheme_id")
+    kw = {}
+    if scheme_id:
+        sc = get_scheme(int(scheme_id), admin=getattr(user, "role", None) == "admin")
+        kw = dict(max_grade_point=Decimal(sc.max_grade_point), decimal_places=sc.decimal_places, rounding=sc.rounding,
+                  percentage_formula=sc.percentage_formula if sc.verification_status == "verified" else None,
+                  classification=sc.classification if sc.verification_status == "verified" else None)
+    result = compute_cgpa(payload.get("semesters"), **kw)
+    result["scheme"] = {"id": sc.id, "name": sc.name} if scheme_id else None
+    if not scheme_id:
+        result["assumptions"].append("No scheme selected: 10-point scale, rounded half-up to 2 decimals; "
+                                     "no percentage conversion or classification is shown.")
+    elif result["percentage"] is None:
+        result["assumptions"].append("No officially sourced percentage conversion is configured for this scheme, so none is shown.")
+    if payload.get("save"):
+        if not user:
+            raise BadRequest("Log in to save calculator history", status=401, code="unauthorized")
+        result["history_id"] = _save(user, "cgpa", scheme_id or None, None, payload.get("label"),
+                                     {"semesters": payload.get("semesters")}, result)
+    return result
+
+
+def history(user, kind=None):
+    q = CalculatorHistory.query.filter_by(user_id=user.id)
+    if kind in ("sgpa", "cgpa"):
+        q = q.filter_by(kind=kind)
+    return [h.to_dict() for h in q.order_by(CalculatorHistory.created_at.desc()).limit(50).all()]
+
+
+def delete_history(user, hid):
+    h = CalculatorHistory.query.filter_by(id=hid, user_id=user.id).first()
+    if not h:
+        raise NotFound("History entry not found")
+    db.session.delete(h)
+    db.session.commit()
+Copy
+backend/app/services/reference.py (new: dropdown lookups, admin CRUD, CSV import)
+Copyimport csv
+import io
+import re
+
+from marshmallow import ValidationError
+from sqlalchemy.exc import IntegrityError
+
+from app.extensions import db
+from app.models import Branch, College, Degree, District, Taluk, University
+from app.services.audit_adapter import audit
+from app.utils.constants import INDIAN_STATES_AND_UTS
+from app.utils.errors import BadRequest, Conflict, NotFound
+
+URL = re.compile(r"^https?://", re.I)
+KINDS = {
+    "districts": (District, {"state": str, "name": str, "former_name": str, "lgd_code": str, "source": str}, ["state", "name"]),
+    "taluks": (Taluk, {"district_id": int, "name": str, "lgd_code": str}, ["district_id", "name"]),
+    "universities": (University, {"name": str, "short_name": str, "state": str, "aishe_code": str,
+                                  "university_type": str, "source_url": str, "is_verified": bool}, ["name"]),
+    "colleges": (College, {"university_id": int, "name": str, "college_code": str, "aishe_code": str,
+                           "district_id": int, "city": str, "source_url": str, "is_verified": bool}, ["name"]),
+    "degrees": (Degree, {"name": str, "education_level": str}, ["name"]),
+    "branches": (Branch, {"degree_id": int, "name": str}, ["degree_id", "name"]),
+}
+PARENTS = {"district_id": District, "university_id": University, "degree_id": Degree}
+
+
+def _kind(kind):
+    if kind not in KINDS:
+        raise NotFound("Unknown reference type")
+    return KINDS[kind]
+
+
+def lookup(kind, args):
+    Model = _kind(kind)[0]
+    q = Model.query
+    for key in ("state", "district_id", "university_id", "degree_id"):
+        if args.get(key) and hasattr(Model, key):
+            q = q.filter(getattr(Model, key) == (int(args[key]) if key.endswith("_id") else args[key]))
+    if args.get("q"):
+        q = q.filter(Model.name.ilike(f"%{args['q'].strip()[:80]}%"))
+    return [m.to_dict() for m in q.order_by(Model.name).limit(3000).all()]
+
+
+def admin_list(kind, args):
+    Model = _kind(kind)[0]
+    page = max(int(args.get("page", 1) or 1), 1)
+    per = min(max(int(args.get("per_page", 50) or 50), 1), 200)
+    q = Model.query
+    if args.get("q"):
+        q = q.filter(Model.name.ilike(f"%{args['q'].strip()[:80]}%"))
+    total = q.count()
+    items = q.order_by(Model.name).offset((page - 1) * per).limit(per).all()
+    return {"items": [m.to_dict() for m in items], "meta": {"page": page, "per_page": per, "total": total}}
+
+
+def _clean(kind, payload, partial=False):
+    Model, spec, required = _kind(kind)
+    out, errors = {}, {}
+    for f, typ in spec.items():
+        if f not in payload:
+            continue
+        v = payload[f]
+        if v in ("", None):
+            out[f] = None
+        elif typ is int:
+            try:
+                out[f] = int(v)
+            except (TypeError, ValueError):
+                errors[f] = ["Must be a number"]
+        elif typ is bool:
+            out[f] = bool(v)
+        else:
+            v = str(v).strip()
+            length = Model.__table__.columns[f].type.length
+            if length and len(v) > length:
+                errors[f] = [f"At most {length} characters"]
+            out[f] = v
+    if not partial:
+        for f in required:
+            if out.get(f) in (None, ""):
+                errors[f] = ["Required"]
+    if out.get("state") and out["state"] not in INDIAN_STATES_AND_UTS:
+        errors["state"] = ["Unknown state/UT"]
+    if out.get("source_url") and not URL.match(out["source_url"]):
+        errors["source_url"] = ["Must be an http(s) URL"]
+    for f, Parent in PARENTS.items():
+        if out.get(f) and not db.session.get(Parent, out[f]):
+            errors[f] = ["Not found"]
+    if errors:
+        raise ValidationError(errors)
+    return out
+
+
+def save(admin, kind, payload, item_id=None):
+    Model = _kind(kind)[0]
+    obj = db.session.get(Model, item_id) if item_id else Model()
+    if item_id and not obj:
+        raise NotFound("Record not found")
+    for k, v in _clean(kind, payload, partial=bool(item_id)).items():
+        setattr(obj, k, v)
+    if not item_id:
+        db.session.add(obj)
+    try:
+        db.session.flush()
+    except IntegrityError:
+        db.session.rollback()
+        raise Conflict("A record with this name already exists")
+    audit(admin, f"reference.{kind}.{'update' if item_id else 'create'}", kind, obj.id)
+    db.session.commit()
+    return obj.to_dict()
+
+
+def delete(admin, kind, item_id):
+    Model = _kind(kind)[0]
+    obj = db.session.get(Model, item_id)
+    if not obj:
+        raise NotFound("Record not found")
+    db.session.delete(obj)
+    audit(admin, f"reference.{kind}.delete", kind, item_id)
+    db.session.commit()
+
+
+# --- CSV import (official downloads: LGD for districts/sub-districts, AISHE/UGC/VTU lists for institutions) ---
+ALIASES = {
+    "state": ["state", "state name", "state_name"],
+    "district": ["district", "district name", "district_name"],
+    "name": ["name", "college name", "university name", "institution name", "sub-district name",
+             "subdistrict name", "taluk", "taluk name", "degree", "branch", "branch name"],
+    "university": ["university", "university name", "affiliating university", "affiliated university"],
+    "lgd_code": ["lgd code", "sub-district code", "subdistrict code", "district code", "lgd_code"],
+    "aishe_code": ["aishe code", "aishe_code", "aishe id"],
+    "college_code": ["college code", "college_code", "vtu code", "institution code"],
+    "city": ["city", "town", "location"],
+    "university_type": ["type", "university type", "management"],
+    "short_name": ["short name", "short_name"],
+    "education_level": ["education level", "education_level", "level"],
+    "degree_name": ["degree", "degree name", "programme"],
+    "former_name": ["former name", "former_name"],
+}
+
+
+def _pick(row, key):
+    for a in ALIASES.get(key, [key]):
+        if row.get(a):
+            return row[a].strip()
+    return None
+
+
+def import_csv(admin, kind, text, source_url=None):
+    _kind(kind)
+    reader = csv.DictReader(io.StringIO(text))
+    created = updated = 0
+    errors = []
+    for n, raw in enumerate(reader, start=2):
+        if n > 20001:
+            errors.append({"row": n, "error": "row limit 20000 reached"})
+            break
+        row = {(k or "").strip().lower(): (v or "") for k, v in raw.items()}
+        try:
+            obj, is_new = _upsert(kind, row, source_url)
+            created += is_new
+            updated += not is_new
+        except ValueError as exc:
+            errors.append({"row": n, "error": str(exc)})
+    audit(admin, f"reference.{kind}.import", kind, None, {"created": created, "updated": updated, "errors": len(errors)})
+    db.session.commit()
+    return {"created": created, "updated": updated, "errors": errors[:100]}
+
+
+def _district(state, name):
+    d = District.query.filter(District.state == state, (District.name == name) | (District.former_name == name)).first()
+    if not dCopy
+Copy:
+        raise ValueError(f"unknown district '{name}' in {state}; import districts first")
+    return d
+
+
+def _upsert(kind, row, source_url):
+    name = _pick(row, "name")
+    if not name:
+        raise ValueError("name is required")
+    if kind == "districts":
+        state = _pick(row, "state")
+        if state not in INDIAN_STATES_AND_UTS:
+            raise ValueError(f"unknown state '{state}'")
+        obj = District.query.filter_by(state=state, name=name).first()
+        new = obj is None
+        obj = obj or District(state=state, name=name)
+        obj.lgd_code = _pick(row, "lgd_code") or obj.lgd_code
+        obj.former_name = _pick(row, "former_name") or obj.former_name
+        obj.source = source_url or obj.source
+    elif kind == "taluks":
+        d = _district(_pick(row, "state"), _pick(row, "district"))
+        obj = Taluk.query.filter_by(district_id=d.id, name=name).first()
+        new = obj is None
+        obj = obj or Taluk(district_id=d.id, name=name)
+        obj.lgd_code = _pick(row, "lgd_code") or obj.lgd_code
+    elif kind == "universities":
+        obj = University.query.filter_by(name=name).first()
+        new = obj is None
+        obj = obj or University(name=name)
+        for f in ("short_name", "aishe_code", "university_type"):
+            setattr(obj, f, _pick(row, f) or getattr(obj, f))
+        st = _pick(row, "state")
+        obj.state = st if st in INDIAN_STATES_AND_UTS else obj.state
+        obj.source_url = source_url or obj.source_url
+        obj.is_verified = bool(source_url) or obj.is_verified
+    elif kind == "colleges":
+        uname = _pick(row, "university")
+        uni = University.query.filter_by(name=uname).first() if uname else None
+        if uname and not uni:
+            raise ValueError(f"unknown university '{uname}'; import universities first")
+        obj = College.query.filter_by(university_id=uni.id if uni else None, name=name).first()
+        new = obj is None
+        obj = obj or College(university_id=uni.id if uni else None, name=name)
+        for f in ("college_code", "aishe_code", "city"):
+            setattr(obj, f, _pick(row, f) or getattr(obj, f))
+        if _pick(row, "district") and _pick(row, "state"):
+            obj.district_id = _district(_pick(row, "state"), _pick(row, "district")).id
+        obj.source_url = source_url or obj.source_url
+        obj.is_verified = bool(source_url) or obj.is_verified
+    elif kind == "degrees":
+        obj = Degree.query.filter_by(name=name).first()
+        new = obj is None
+        obj = obj or Degree(name=name)
+        obj.education_level = _pick(row, "education_level") or obj.education_level
+    else:  # branches
+        dname = _pick(row, "degree_name")
+        deg = Degree.query.filter_by(name=dname).first() if dname else None
+        if not deg:
+            raise ValueError(f"unknown degree '{dname}'")
+        obj = Branch.query.filter_by(degree_id=deg.id, name=name).first()
+        new = obj is None
+        obj = obj or Branch(degree_id=deg.id, name=name)
+    if new:
+        db.session.add(obj)
+    db.session.flush()
+    return obj, new
+Copy
+backend/app/services/eligibility.py (new: "Find Scholarships For Me")
+Copy"""Three-way matching: eligible (every stated criterion confirmed), potential (nothing contradicts,
+but some criterion can't be confirmed from the profile), ineligible (at least one criterion fails)."""
+from decimal import Decimal
+
+from app.models import Scholarship
+from app.services.scholarship import search_query
+
+FIELD_LABELS = {"income": "annual family income", "education_level": "education level", "state": "state",
+                "category": "social category", "gender": "gender", "course": "course/degree",
+                "min_marks": "academic marks"}
+
+
+def _profile_value(p, ctype):
+    return {"income": p.annual_family_income, "education_level": p.education_level, "state": p.state,
+            "category": p.social_category, "gender": p.gender, "course": p.degree,
+            "min_marks": p.academic_percentage}.get(ctype)
+
+
+def evaluate(sch: Scholarship, p) -> dict:
+    confirmed, unknown, failed = [], [], []
+    if sch.state:
+        if not p.state:
+            unknown.append("Add your state to your profile")
+        elif p.state != sch.state:
+            failed.append(f"Only for {sch.state} students (you: {p.state})")
+        else:
+            confirmed.append(f"State: {sch.state}")
+    by_type = {}
+    for e in sch.eligibility:
+        by_type.setdefault(e.criterion_type, []).append(e)
+    for ctype, items in by_type.items():
+        mine = _profile_value(p, ctype)
+        label = FIELD_LABELS.get(ctype)
+        if label is None:  # free-text criterion the system can't evaluate
+            unknown.extend(f"Check: {e.description or e.value}" for e in items)
+            continue
+        if mine in (None, ""):
+            unknown.append(f"Add your {label} to your profile")
+            continue
+        if ctype == "income":
+            cap = min((e.numeric_value for e in items if e.numeric_value is not None), default=None)
+            if cap is None:
+                unknown.append("Income rule stated in text only; check the official notice")
+            elif Decimal(mine) <= Decimal(cap):
+                confirmed.append(f"Income ₹{mine:,.0f} within limit ₹{Decimal(cap):,.0f}")
+            else:
+                failed.append(f"Income limit ₹{Decimal(cap):,.0f} (you: ₹{Decimal(mine):,.0f})")
+        elif ctype == "min_marks":
+            need = max((e.numeric_value for e in items if e.numeric_value is not None), default=None)
+            if need is None:
+                unknown.append("Marks rule stated in text only; check the official notice")
+            elif Decimal(mine) >= Decimal(need):
+                confirmed.append(f"Marks {mine}% ≥ {need}%")
+            else:
+                failed.append(f"Needs at least {need}% (you: {mine}%)")
+        else:
+            allowed = {str(e.value or "").strip().lower() for e in items if e.value}
+            if not allowed:
+                unknown.extend(f"Check: {e.description}" for e in items if e.description)
+            elif str(mine).strip().lower() in allowed:
+                confirmed.append(f"{label.capitalize()}: {mine}")
+            else:
+                failed.append(f"{label.capitalize()} must be one of: {', '.join(sorted(allowed))} (you: {mine})")
+    status = "ineligible" if failed else ("potential" if unknown else "eligible")
+    return {"status": status, "confirmed": confirmed, "unknown": unknown, "failed": failed}
+
+
+def match_for(user, limit=200):
+    p = user.profile
+    rows = search_query({"sort": "deadline"}).limit(limit).all()
+    buckets = {"eligible": [], "potential": [], "ineligible": []}
+    for s in rows:
+        r = evaluate(s, p)
+        buckets[r["status"]].append({"scholarship_id": s.id, **r})
+    return {"counts": {k: len(v) for k, v in buckets.items()}, **buckets,
+            "note": "‘Eligible’ means every criterion stored for the scheme matched your profile. "
+                    "Always confirm on the official portal before applying."}
+Copy
+Patch backend/app/services/scholarship.py search_query
+Replace the body of the existing function from the line if level := filters.get("education_level"): down to the sort block with the code below. Also add these new fields to SIMPLE_FIELDS: "district", "source_platform", "application_process", "course_requirements". At the top of search_query, add the line query = query.filter(Scholarship.is_archived.is_(False)) (skip it when admin and filters.get("include_archived")).
+
+Copy    from sqlalchemy import func
+    from datetime import timedelta
+    from app.utils.reference_constants import CLOSING_SOON_DAYS
+    today = today_local()
+    E = ScholarshipEligibility
+    if q := filters.get("q"):
+        like = f"%{q.strip()}%"
+        course_hit = exists().where(and_(E.scholarship_id == Scholarship.id, E.value.ilike(like)))
+        query = query.filter(or_(Scholarship.title.ilike(like), Scholarship.provider_name.ilike(like),
+                                 Scholarship.description.ilike(like), Scholarship.course_requirements.ilike(like),
+                                 course_hit))
+    if filters.get("district"):
+        query = query.filter(or_(Scholarship.district.is_(None), Scholarship.district == filters["district"]))
+    if filters.get("source_platform"):
+        query = query.filter(Scholarship.source_platform == filters["source_platform"])
+    for ctype, key in (("education_level", "education_level"), ("category", "social_category"),
+                       ("course", "degree")):
+        if val := filters.get(key):
+            has_any = exists().where(and_(E.scholarship_id == Scholarship.id, E.criterion_type == ctype))
+            hit = exists().where(and_(E.scholarship_id == Scholarship.id, E.criterion_type == ctype,
+                                      func.lower(E.value) == val.strip().lower()))
+            query = query.filter(or_(~has_any, hit))
+    if filters.get("income") is not None:
+        too_low = exists().where(and_(E.scholarship_id == Scholarship.id, E.criterion_type == "income",
+                                      E.numeric_value.isnot(None), E.numeric_value < filters["income"]))
+        query = query.filter(~too_low)
+    open_status = filters.get("open_status")
+    C, O = Scholarship.application_close_date, Scholarship.application_open_date
+    if open_status == "open":
+        query = query.filter(or_(O.is_(None), O <= today), or_(C.is_(None), C >= today))
+    elif open_status == "closing_soon":
+        query = query.filter(C >= today, C <= today + timedelta(days=CLOSING_SOON_DAYS))
+    elif open_status == "upcoming":
+        query = query.filter(O > today)
+    elif open_status == "closed":
+        query = query.filter(C < today)
+    sort = filters.get("sort", "deadline")
+    if sort == "newest":
+        query = query.order_by(Scholarship.created_at.desc())
+    elif sort == "amount":
+        query = query.order_by(Scholarship.amount_max.is_(None), Scholarship.amount_max.desc())
+    elif sort == "title":
+        query = query.order_by(Scholarship.title.asc())
+    else:
+        query = query.order_by(C.is_(None), C.asc(), Scholarship.id)
+    return query
+Copy
+The existing include_expired check runs before this block, so open_status=closed also needs include_expired. The route below sets it automatically. In FilterSchema, add district, source_platform, social_category, degree (strings) and open_status (OneOf(OPEN_STATUSES)), and add "amount" to the allowed sort values. Add the following to the scholarship serializer:
+
+Copydef status_of(s):
+    t = today_local()
+    if s.application_close_date and s.application_close_date < t: return "closed"
+    if s.application_open_date and s.application_open_date > t: return "upcoming"
+    if s.application_close_date and (s.application_close_date - t).days <= 15: return "closing_soon"
+    return "open"
+# in to_dict: "open_status": status_of(s), "district": s.district, "source_platform": s.source_platform,
+#             "application_process": s.application_process, "course_requirements": s.course_requirements,
+#             "is_archived": s.is_archived
+Add archive support to the same service:
+
+Copydef archive(admin, sch, flag=True):
+    sch.is_archived, sch.archived_at = flag, (utcnow() if flag else None)
+    if flag:
+        sch.is_published = False
+    log_action_safe(admin, "scholarship.archive" if flag else "scholarship.unarchive", sch.id)
+
+def archive_expired(admin):
+    rows = Scholarship.query.filter(Scholarship.application_close_date < today_local(),
+                                    Scholarship.is_archived.is_(False)).all()
+    for s in rows:
+        s.is_archived, s.archived_at, s.is_published, s.verification_status = True, utcnow(), False, "expired"
+    from app.services.audit_adapter import audit
+    audit(admin, "scholarship.archive_expired", "scholarship", None, {"count": len(rows)})
+    db.session.commit()
+    return len(rows)
+
+def log_action_safe(admin, action, sid):
+    from app.services.audit_adapter import audit
+    audit(admin, action, "scholarship", sid)
+    db.session.commit()
+Patch backend/app/schemas/profile.py (add to ProfileUpdateSchema)
+Copy    address = fields.String(allow_none=True, validate=validate.Length(max=300))
+    taluk = fields.String(allow_none=True, validate=validate.Length(max=120))
+    city = fields.String(allow_none=True, validate=validate.Length(max=120))
+    admission_year = fields.Integer(allow_none=True, validate=validate.Range(1990, 2100))
+    current_academic_year = fields.Integer(allow_none=True, validate=validate.Range(1, 6))
+    academic_cgpa = fields.Decimal(allow_none=True, places=2, validate=validate.Range(0, 10))
+    academic_percentage = fields.Decimal(allow_none=True, places=2, validate=validate.Range(0, 100))
+    gender = fields.String(allow_none=True, validate=validate.OneOf(GENDERS))
+    social_category = fields.String(allow_none=True, validate=validate.OneOf(SOCIAL_CATEGORIES))
+    district_id = fields.Integer(allow_none=True)
+    taluk_id = fields.Integer(allow_none=True)
+    university_id = fields.Integer(allow_none=True)
+    college_id = fields.Integer(allow_none=True)
+    degree_id = fields.Integer(allow_none=True)
+    branch_id = fields.Integer(allow_none=True)
+
+    @validates_schema
+    def check_consistency(self, d, **_):
+        from app.extensions import db
+        from app.models import Branch, College, District, Taluk
+        if d.get("admission_year") and d.get("graduation_year") and d["graduation_year"] < d["admission_year"]:
+            raise ValidationError("Graduation year cannot be before admission year", "graduation_year")
+        y, s = d.get("current_academic_year"), d.get("current_semester")
+        if y and s and s not in (2 * y - 1, 2 * y):
+            raise ValidationError(f"Year {y} covers semesters {2*y-1} and {2*y}", "current_semester")
+        if d.get("taluk_id") and d.get("district_id"):
+            t = db.session.get(Taluk, d["taluk_id"])
+            if not t or t.district_id != d["district_id"]:
+                raise ValidationError("Taluk does not belong to the selected district", "taluk_id")
+        if d.get("district_id") and d.get("state"):
+            dist = db.session.get(District, d["district_id"])
+            if not dist or dist.state != d["state"]:
+                raise ValidationError("District does not belong to the selected state", "district_id")
+        if d.get("college_id") and d.get("university_id"):
+            c = db.session.get(College, d["college_id"])
+            if not c or c.university_id != d["university_id"]:
+                raise ValidationError("College is not affiliated to the selected university", "college_id")
+        if d.get("branch_id") and d.get("degree_id"):
+            b = db.session.get(Branch, d["branch_id"])
+            if not b or b.degree_id != d["degree_id"]:
+                raise ValidationError("Branch does not belong to the selected degree", "branch_id")
+Copy
+Import GENDERS and SOCIAL_CATEGORIES from app.utils.reference_constants, plus validates_schema and ValidationError. Because the frontend sends the *_id fields, the profile service fills in the text columns too, so existing scholarship matching keeps working. Add this to the profile update service before setting attributes:
+
+Copyfrom app.models import District, Taluk, University, College, Degree, Branch
+NAME_FROM_ID = {"district_id": ("district", District), "taluk_id": ("taluk", Taluk),
+                "university_id": ("university", University), "college_id": ("college", College),
+                "degree_id": ("degree", Degree), "branch_id": ("branch", Branch)}
+for key, (text_field, Model) in NAME_FROM_ID.items():
+    if data.get(key):
+        obj = db.session.get(Model, data[key])
+        if not obj:
+            raise ValidationError({key: ["Not found"]})
+        data.setdefault(text_field, obj.name)   # explicit "Other / Not listed" text still wins if sent with id=None
+Add this function to the same service (used by the dashboard and the profile page):
+
+CopyCOMPLETION_FIELDS = ("full_name", "phone", "gender", "date_of_birth", "address", "state", "district", "city",
+                     "university", "college", "degree", "branch", "education_level", "admission_year",
+                     "current_semester", "graduation_year", "social_category", "annual_family_income")
+def completion(user):
+    p = user.profile
+    vals = {f: (user.full_name if f == "full_name" and hasattr(user, "full_name") else getattr(p, f, None))
+            for f in COMPLETION_FIELDS}
+    missing = [f for f, v in vals.items() if v in (None, "")]
+    return {"percent": round(100 * (len(COMPLETION_FIELDS) - len(missing)) / len(COMPLETION_FIELDS)), "missing": missing}
+backend/app/routes/vtu.py (new)
+Copyfrom flask import Blueprint, request
+from flask_jwt_extended import verify_jwt_in_request
+
+from app.middleware.auth import current_user_required, get_current_user_optional
+from app.services import vtu
+from app.utils.responses import ok
+
+bp = Blueprint("vtu", __name__, url_prefix="/api/vtu")
+
+
+@bp.get("/schemes")
+def schemes():
+    return ok(vtu.list_schemes())
+
+
+@bp.get("/schemes/<int:sid>")
+def scheme(sid):
+    return ok(vtu.scheme_dict(vtu.get_scheme(sid), detail=True))
+
+
+@bp.get("/schemes/<int:sid>/curriculum")
+def curr(sid):
+    return ok(vtu.curriculum(vtu.get_scheme(sid), request.args.get("semester", type=int),
+                             request.args.get("branch_id", type=int)))
+
+
+@bp.post("/sgpa")
+def sgpa():
+    return ok(vtu.run_sgpa(get_current_user_optional(), request.get_json(silent=True) or {}))
+
+
+@bp.post("/cgpa")
+def cgpa():
+    return ok(vtu.run_cgpa(get_current_user_optional(), request.get_json(silent=True) or {}))
+
+
+@bp.get("/history")
+@current_user_required
+def history(user):
+    return ok(vtu.history(user, request.args.get("kind")))
+
+
+@bp.delete("/history/<int:hid>")
+@current_user_required
+def del_history(user, hid):
+    vtu.delete_history(user, hid)
+    return ok({"deleted": True})
+Copy
+Check: I couldn't see your auth middleware. If current_user_required/get_current_user_optional don't exist under those names, swap in your equivalents: @jwt_required() plus your current-user getter, and verify_jwt_in_request(optional=True) for the optional version. Register the CalcError handler in app/__init__.py so it returns 422:
+
+Copyfrom app.services.vtu_calc import CalcError
+@app.errorhandler(CalcError)
+def _calc(e): return {"error": {"code": "validation_error", "message": str(e), "fields": e.errors}}, 422
+backend/app/routes/reference.py (new: dropdown data, public)
+Copyfrom flask import Blueprint, request
+
+from app.services import reference
+from app.utils.constants import EDUCATION_LEVELS, INDIAN_STATES_AND_UTS
+from app.utils.reference_constants import ACADEMIC_YEAR_SEMESTERS, GENDERS, SOCIAL_CATEGORIES, SOURCE_PLATFORMS
+from app.utils.responses import ok
+
+bp = Blueprint("reference", __name__, url_prefix="/api/reference")
+
+
+@bp.get("/meta")
+def meta():
+    return ok({"states": list(INDIAN_STATES_AND_UTS), "genders": list(GENDERS),
+               "social_categories": list(SOCIAL_CATEGORIES), "education_levels": list(EDUCATION_LEVELS),
+               "source_platforms": list(SOURCE_PLATFORMS),
+               "academic_years": {str(k): list(v) for k, v in ACADEMIC_YEAR_SEMESTERS.items()}})
+
+
+@bp.get("/<kind>")
+def lookup(kind):
+    return ok(reference.lookup(kind, request.args))
+Additions to backend/app/routes/admin.py
+These go under the existing before_request admin guard, so they're admin-only automatically. current_admin() stands for however your file currently gets the admin user.
+
+Copyfrom app.services import reference as ref_svc, vtu as vtu_svc
+from app.services.scholarship import archive, archive_expired
+
+@bp.post("/scholarships/<int:sid>/archive")
+def sch_archive(sid):
+    s = Scholarship.query.get_or_404(sid); archive(current_admin(), s, True); return ok({"archived": True})
+
+@bp.post("/scholarships/<int:sid>/unarchive")
+def sch_unarchive(sid):
+    s = Scholarship.query.get_or_404(sid); archive(current_admin(), s, False); return ok({"archived": False})
+
+@bp.post("/scholarships/archive-expired")
+def sch_archive_expired():
+    return ok({"archived": archive_expired(current_admin())})
+
+@bp.get("/reference/<kind>")
+def ref_list(kind): return ok(ref_svc.admin_list(kind, request.args))
+
+@bp.post("/reference/<kind>")
+def ref_create(kind): return ok(ref_svc.save(current_admin(), kind, request.get_json() or {}), status=201)
+
+@bp.patch("/reference/<kind>/<int:item_id>")
+def ref_update(kind, item_id): return ok(ref_svc.save(current_admin(), kind, request.get_json() or {}, item_id))
+
+@bp.delete("/reference/<kind>/<int:item_id>")
+def ref_delete(kind, item_id):
+    ref_svc.delete(current_admin(), kind, item_id); return ok({"deleted": True})
+
+@bp.post("/reference/<kind>/import")
+def ref_import(kind):
+    f = request.files.get("file")
+    if not f: raise BadRequest("Attach a CSV file")
+    data = f.read(10 * 1024 * 1024 + 1)
+    if len(data) > 10 * 1024 * 1024: raise BadRequest("CSV larger than 10 MB", status=413)
+    return ok(ref_svc.import_csv(current_admin(), kind, data.decode("utf-8-sig", "replace"),
+                                 request.form.get("source_url") or None))
+
+@bp.get("/schemes")
+def schemes_list(): return ok(vtu_svc.list_schemes(admin=True))
+
+@bp.post("/schemes")
+def schemes_create(): return ok(vtu_svc.scheme_dict(vtu_svc.save_scheme(current_admin(), request.get_json() or {}), True), status=201)
+
+@bp.get("/schemes/<int:sid>")
+def schemes_get(sid): return ok(vtu_svc.scheme_dict(vtu_svc.get_scheme(sid, admin=True), True))
+
+@bp.patch("/schemes/<int:sid>")
+def schemes_update(sid):
+    sc = vtu_svc.get_scheme(sid, admin=True)
+    return ok(vtu_svc.scheme_dict(vtu_svc.save_scheme(current_admin(), request.get_json() or {}, sc), True))
+
+@bp.put("/schemes/<int:sid>/bands")
+def schemes_bands(sid):
+    sc = vtu_svc.get_scheme(sid, admin=True)
+    return ok(vtu_svc.scheme_dict(vtu_svc.replace_bands(current_admin(), sc, request.get_json()), True))
+
+@bp.post("/schemes/<int:sid>/verify")
+def schemes_verify(sid):
+    sc = vtu_svc.get_scheme(sid, admin=True)
+    return ok(vtu_svc.scheme_dict(vtu_svc.verify_scheme(current_admin(), sc, (request.get_json(silent=True) or {}).get("notes")), True))
+
+@bp.post("/schemes/<int:sid>/publish")
+def schemes_publish(sid):
+    sc = vtu_svc.get_scheme(sid, admin=True)
+    flag = bool((request.get_json(silent=True) or {}).get("published", True))
+    return ok(vtu_svc.scheme_dict(vtu_svc.set_published(current_admin(), sc, flag), True))
+
+@bp.post("/schemes/<int:sid>/curriculum/import")
+def schemes_curriculum(sid):
+    sc = vtu_svc.get_scheme(sid, admin=True)
+    f = request.files.get("file")
+    if not f: raise BadRequest("Attach a CSV file")
+    return ok(vtu_svc.import_curriculum(current_admin(), sc, f.read(5 * 1024 * 1024).decode("utf-8-sig", "replace")))
+
+@bp.get("/activity")
+def activity():
+    from app.models import AdminLog  # existing model
+    rows = AdminLog.query.order_by(AdminLog.created_at.desc()).limit(200).all()
+    return ok([r.to_dict() for r in rows])
+Copy
+Student route additions (routes/students.py, routes/scholarships.py)
+Copy# students.py
+from app.services.profile import completion
+@bp.get("/profile/completion")
+@current_user_required
+def profile_completion(user): return ok(completion(user))
+
+# scholarships.py
+from app.services.eligibility import match_for, evaluate
+@bp.get("/match")
+@current_user_required
+def match(user): return ok(match_for(user))
+# In the list route, before search_query: if args.get("open_status") == "closed": args["include_expired"] = True
+# In the detail route, when a user is logged in: payload["eligibility_check"] = evaluate(sch, user.profile)
+Register the new blueprints in routes/__init__.py: from app.routes import vtu, reference → app.register_blueprint(vtu.bp); app.register_blueprint(reference.bp).
+
+Dashboard additions (services/dashboard.py → student_dashboard)
+These are added to the existing keys; none are removed.
+
+Copy    from app.services.profile import completion
+    from app.services.eligibility import match_for
+    from app.models import CalculatorHistory
+    p = user.profile
+    m = match_for(user, limit=100)
+    out.update({
+        "profile": {"full_name": getattr(user, "full_name", None), "avatar_url": "/api/students/profile/avatar" if p.avatar_path else None,
+                    "university": p.university, "college": p.college, "degree": p.degree, "branch": p.branch,
+                    "current_semester": p.current_semester, "education_level": p.education_level},
+        "profile_completion": completion(user),
+        "recommendations": m["eligible"][:5] + m["potential"][:5 - min(5, len(m["eligible"]))],
+        "match_counts": m["counts"],
+        "latest_sgpa_calc": (lambda h: h.result.get("sgpa") if h else None)(
+            CalculatorHistory.query.filter_by(user_id=user.id, kind="sgpa").order_by(CalculatorHistory.created_at.desc()).first()),
+    })
+backend/app/cli.py additions
+Copyimport click, json, pathlib
+
+@app.cli.group("scholarships")
+def sch_cli(): pass
+
+@sch_cli.command("diagnose")
+def diagnose():
+    """Explain why students see 'No scholarships found'."""
+    from app.models import Scholarship
+    from app.utils.timeutils import today_local
+    t = today_local(); Q = Scholarship.query
+    total = Q.count(); pub = Q.filter_by(is_published=True).count()
+    ver = Q.filter_by(verification_status="verified").count()
+    live = Q.filter(Scholarship.is_published.is_(True), Scholarship.is_archived.is_(False),
+                    (Scholarship.application_close_date.is_(None)) | (Scholarship.application_close_date >= t)).count()
+    click.echo(f"today_local()={t}  total={total} verified={ver} published={pub} visible_to_students={live}")
+    if total == 0: click.echo("→ Database has no scholarships. Add verified records via Admin → Scholarships.")
+    elif pub == 0: click.echo("→ Records exist but none are published. Verify then publish them in the admin panel.")
+    elif live == 0: click.echo("→ All published records are expired or archived. Update deadlines for the new cycle.")
+    else: click.echo("→ Records are visible; if UI is still empty check browser network tab /api/scholarships response.")
+
+@app.cli.command("seed-vtu-draft")
+@click.argument("path", type=click.Path(exists=True))
+def seed_vtu_draft(path):
+    """Load a scheme draft JSON as UNVERIFIED + UNPUBLISHED. An admin must check it against the regulation."""
+    from app.extensions import db
+    from app.models import AcademicScheme, SchemeGradeBand, University
+    data = json.loads(pathlib.Path(path).read_text())
+    uni = University.query.filter_by(name=data["university"]).first()
+    if not uni:
+        uni = University(name=data["university"], short_name=data.get("short_name"), state=data.get("state"))
+        db.session.add(uni); db.session.flush()
+    for s in data["schemes"]:
+        if AcademicScheme.query.filter_by(university_id=uni.id, code=s["code"]).first():
+            click.echo(f"skip {s['code']} (exists)"); continue
+        sc = AcademicScheme(university_id=uni.id, verification_status="unverified", is_published=False,
+                            **{k: v for k, v in s.items() if k != "bands"})
+        for i, b in enumerate(s.get("bands", [])):
+            sc.bands.append(SchemeGradeBand(sort_order=i, **b))
+        db.session.add(sc); click.echo(f"added draft {s['code']}")
+    db.session.commit()
+Copy
+database/reference/vtu_schemes_draft.json (new)
+This is a draft and it is unverified. These values are my understanding of the commonly cited VTU grading tables. They were not checked against the regulation documents. The loader marks them unverified and unpublished. Before verifying, an admin must compare every number with the official VTU regulation PDF on vtu.ac.in and enter its URL. Where I'm unsure of a rule, I left the field null rather than guess; for example, the minimum marks for CIE/SEE are null.
+
+Copy{
+  "university": "Visvesvaraya Technological University", "short_name": "VTU", "state": "Karnataka",
+  "schemes": [
+    {"code": "2022", "name": "VTU 2022 Scheme (B.E./B.Tech) — DRAFT, verify against regulation",
+     "max_total_marks": 100, "max_grade_point": 10, "cie_max": 50, "see_max": 50,
+     "cie_min_pass": null, "see_min_pass": null, "total_min_pass": null,
+     "marks_rounding": "none", "fail_credits_in_denominator": true,
+     "notes": "Draft. Confirm bands, CIE/SEE minimums, absent handling and any percentage formula from the official 2022 regulations.",
+     "bands": [
+       {"label": "O", "min_marks": 90, "max_marks": 100, "grade_point": 10, "is_pass": true},
+       {"label": "A+", "min_marks": 80, "max_marks": 89, "grade_point": 9, "is_pass": true},
+       {"label": "A", "min_marks": 70, "max_marks": 79, "grade_point": 8, "is_pass": true},
+       {"label": "B+", "min_marks": 60, "max_marks": 69, "grade_point": 7, "is_pass": true},
+       {"label": "B", "min_marks": 55, "max_marks": 59, "grade_point": 6, "is_pass": true},
+       {"label": "C", "min_marks": 50, "max_marks": 54, "grade_point": 5, "is_pass": true},
+       {"label": "P", "min_marks": 40, "max_marks": 49, "grade_point": 4, "is_pass": true},
+       {"label": "F", "min_marks": 0, "max_marks": 39, "grade_point": 0, "is_pass": false},
+       {"label": "AB", "grade_point": 0, "is_pass": false, "is_absent": true}]},
+    {"code": "2021", "name": "VTU 2021 Scheme — DRAFT", "max_total_marks": 100, "max_grade_point": 10,
+     "cie_max": 50, "see_max": 50, "notes": "Draft; same structure assumed as 2022 — verify.",
+     "bands": [
+       {"label": "O", "min_marks": 90, "max_marks": 100, "grade_point": 10, "is_pass": true},
+       {"label": "A+", "min_marks": 80, "max_marks": 89, "grade_point": 9, "is_pass": true},
+       {"label": "A", "min_marks": 70, "max_marks": 79, "grade_point": 8, "is_pass": true},
+       {"label": "B+", "min_marks": 60, "max_marks": 69, "grade_point": 7, "is_pass": true},
+       {"label": "B", "min_marks": 55, "max_marks": 59, "grade_point": 6, "is_pass": true},
+       {"label": "C", "min_marks": 50, "max_marks": 54, "grade_point": 5, "is_pass": true},
+       {"label": "P", "min_marks": 40, "max_marks": 49, "grade_point": 4, "is_pass": true},
+       {"label": "F", "min_marks": 0, "max_marks": 39, "grade_point": 0, "is_pass": false},
+       {"label": "AB", "grade_point": 0, "is_pass": false, "is_absent": true}]},
+    {"code": "2018", "name": "VTU 2018 (CBCS) Scheme — DRAFT", "max_total_marks": 100, "max_grade_point": 10,
+     "cie_max": 40, "see_max": 60, "notes": "Draft; 2018 CBCS uses different CIE/SEE split and bands — verify every band.",
+     "bands": [
+       {"label": "S+", "min_marks": 90, "max_marks": 100, "grade_point": 10, "is_pass": true},
+       {"label": "S", "min_marks": 80, "max_marks": 89, "grade_point": 9, "is_pass": true},
+       {"label": "A", "min_marks": 70, "max_marks": 79, "grade_point": 8, "is_pass": true},
+       {"label": "B", "min_marks": 60, "max_marks": 69, "grade_point": 7, "is_pass": true},
+       {"label": "C", "min_marks": 50, "max_marks": 59, "grade_point": 6, "is_pass": true},
+       {"label": "D", "min_marks": 45, "max_marks": 49, "grade_point": 5, "is_pass": true},
+       {"label": "E", "min_marks": 40, "max_marks": 44, "grade_point": 4, "is_pass": true},
+       {"label": "F", "min_marks": 0, "max_marks": 39, "grade_point": 0, "is_pass": false},
+       {"label": "AB", "grade_point": 0, "is_pass": false, "is_absent": true}]}
+  ]
+}
+Copy
+database/reference/karnataka_districts.csv (new)
+Karnataka has 31 districts. Vijayanagara, carved out of Ballari, is the newest. Load the official taluk list from the LGD portal (lgdirectory.gov.in) download with POST /api/admin/reference/taluks/import. I haven't typed taluks out by hand because the list is long and I can't check it here.
+
+Copystate,name,former_name
+Karnataka,Bagalkot,
+Karnataka,Ballari,Bellary
+Karnataka,Belagavi,Belgaum
+Karnataka,Bengaluru Rural,
+Karnataka,Bengaluru Urban,
+Karnataka,Bidar,
+Karnataka,Chamarajanagar,
+Karnataka,Chikkaballapura,
+Karnataka,Chikkamagaluru,
+Karnataka,Chitradurga,
+Karnataka,Dakshina Kannada,
+Karnataka,Davanagere,
+Karnataka,Dharwad,
+Karnataka,Gadag,
+Karnataka,Hassan,
+Karnataka,Haveri,
+Karnataka,Kalaburagi,Gulbarga
+Karnataka,Kodagu,
+Karnataka,Kolar,
+Karnataka,Koppal,
+Karnataka,Mandya,
+Karnataka,Mysuru,Mysore
+Karnataka,Raichur,
+Karnataka,Ramanagara,
+Karnataka,Shivamogga,Shimoga
+Karnataka,Tumakuru,Tumkur
+Karnataka,Udupi,
+Karnataka,Uttara Kannada,
+Karnataka,Vijayanagara,
+Karnataka,Vijayapura,Bijapur
+Karnataka,Yadgir,
+Copy
+In 2025 the state government announced that Ramanagara would be renamed "Bengaluru South". I can't confirm that the change took effect officially, so check it against LGD and edit the row in the admin panel if needed.
+
+backend/tests/test_vtu_calc.py (new)
+Every expected value below was worked out by hand. The test fixture uses its own small grade table, so the tests don't depend on the unverified VTU draft.
+
+Copyfrom decimal import Decimal as D
+import pytest
+from app.services.vtu_calc import Band, CalcError, SchemeRules, compute_cgpa, compute_manual_sgpa, compute_sgpa
+
+R = SchemeRules(bands=(Band("A", D(10), True, D(90), D(100)), Band("B", D(8), True, D(70), D(89)),
+                       Band("C", D(5), True, D(40), D(69)), Band("F", D(0), False, D(0), D(39)),
+                       Band("AB", D(0), False, is_absent=True)),
+                cie_max=D(50), see_max=D(50), see_min_pass=D(18), total_min_pass=D(40))
+
+def test_sgpa_by_grade():          # (4*10 + 3*8 + 1*5)/8 = 69/8 = 8.625 -> 8.63 half-up
+    r = compute_sgpa(R, [{"name": "M", "credits": 4, "grade": "A"}, {"name": "P", "credits": 3, "grade": "b"},
+                         {"name": "L", "credits": 1, "grade": "C"}])
+    assert (r["sgpa"], r["total_credits"], r["total_credit_points"], r["all_passed"]) == ("8.63", "8", "69", True)
+
+def test_fail_counts_in_denominator():  # (3*10 + 3*0)/6 = 5.00
+    r = compute_sgpa(R, [{"name": "X", "credits": 3, "grade": "A"}, {"name": "Y", "credits": 3, "grade": "F"}])
+    assert r["sgpa"] == "5.00" and not r["all_passed"]
+
+def test_see_minimum_forces_fail():   # CIE 45 + SEE 15 = 60 but SEE < 18 -> F
+    r = compute_sgpa(R, [{"name": "X", "credits": 4, "mode": "marks", "cie": 45, "see": 15}])
+    assert r["rows"][0]["grade"] == "F" and "SEE" in r["rows"][0]["note"]
+
+def test_marks_band_and_absent():
+    r = compute_sgpa(R, [{"name": "X", "credits": 2, "mode": "marks", "total": 92},
+                         {"name": "Y", "credits": 2, "absent": True}])
+    assert [x["grade"] for x in r["rows"]] == ["A", "AB"] and r["sgpa"] == "5.00"
+
+def test_fractional_marks_between_bands_rejected():
+    with pytest.raises(CalcError) as e:
+        compute_sgpa(R, [{"name": "X", "credits": 2, "mode": "marks", "total": 89.5}])
+    assert "subjects[0].total" in e.value.errors
+
+@pytest.mark.parametrize("subj,key", [({"name": "X", "credits": -1, "grade": "A"}, "credits"),
+                                      ({"name": "X", "credits": 3, "grade": "Z"}, "grade"),
+                                      ({"name": "X", "credits": 2.3, "grade": "A"}, "credits"),
+                                      ({"credits": 3, "grade": "A"}, "name")])
+def test_validation(subj, key):
+    with pytest.raises(CalcError) as e:
+        compute_sgpa(R, [subj])
+    assert f"subjects[0].{key}" in e.value.errors
+
+def test_cgpa_weighted_not_average():  # (9*20 + 6*25)/45 = 330/45 = 7.333 -> 7.33 ; simple avg would be 7.50
+    r = compute_cgpa([{"semester": 1, "sgpa": 9, "credits": 20}, {"semester": 2, "sgpa": 6, "credits": 25}])
+    assert r["cgpa"] == "7.33" and r["percentage"] is None
+
+def test_cgpa_percentage_only_with_source():
+    pf = {"type": "linear", "subtract": 0.75, "multiply": 10, "source_url": "https://example.org/reg.pdf"}
+    r = compute_cgpa([{"semester": 1, "sgpa": 8, "credits": 20}], percentage_formula=pf)
+    assert r["percentage"] == "72.50"
+    assert compute_cgpa([{"semester": 1, "sgpa": 8, "credits": 20}],
+                        percentage_formula={**pf, "source_url": None})["percentage"] is None
+
+def test_cgpa_duplicate_semester():
+    with pytest.raises(CalcError):
+        compute_cgpa([{"semester": 1, "sgpa": 8, "credits": 20}, {"semester": 1, "sgpa": 7, "credits": 20}])
+
+def test_manual_sgpa():  # (4*9 + 2*7)/6 = 50/6 = 8.333 -> 8.33
+    assert compute_manual_sgpa([{"name": "A", "credits": 4, "grade_point": 9},
+                                {"name": "B", "credits": 2, "grade_point": 7}])["sgpa"] == "8.33"
+Copy
+backend/tests/test_vtu_api.py and test_profile_ref.py (new)
+These use the client, student_headers and admin_headers fixtures from your existing conftest. Check: rename them if your conftest uses different names.
+
+Copydef test_unverified_scheme_hidden_then_published(client, admin_headers):
+    u = client.post("/api/admin/reference/universities", json={"name": "Test Univ"}, headers=admin_headers).get_json()["data"]
+    sc = client.post("/api/admin/schemes", json={"university_id": u["id"], "code": "T1", "name": "T1"}, headers=admin_headers).get_json()["data"]
+    assert client.get(f"/api/vtu/schemes/{sc['id']}").status_code == 404
+    bands = [{"label": "P", "min_marks": 40, "max_marks": 100, "grade_point": 10, "is_pass": True},
+             {"label": "F", "min_marks": 0, "max_marks": 39, "grade_point": 0, "is_pass": False}]
+    assert client.put(f"/api/admin/schemes/{sc['id']}/bands", json=bands, headers=admin_headers).status_code == 200
+    assert client.post(f"/api/admin/schemes/{sc['id']}/verify", headers=admin_headers).status_code == 400  # no URL
+    client.patch(f"/api/admin/schemes/{sc['id']}", json={"regulation_url": "https://example.org/r.pdf"}, headers=admin_headers)
+    assert client.post(f"/api/admin/schemes/{sc['id']}/verify", headers=admin_headers).status_code == 200
+    client.post(f"/api/admin/schemes/{sc['id']}/publish", json={"published": True}, headers=admin_headers)
+    r = client.post("/api/vtu/sgpa", json={"scheme_id": sc["id"], "subjects": [{"name": "A", "credits": 4, "grade": "P"}]})
+    assert r.get_json()["data"]["sgpa"] == "10.00"
+
+def test_sgpa_history_saved(client, student_headers):
+    r = client.post("/api/vtu/sgpa", json={"save": True, "subjects": [{"name": "A", "credits": 2, "grade_point": 8}]},
+                    headers=student_headers)
+    assert r.status_code == 200
+    assert len(client.get("/api/vtu/history", headers=student_headers).get_json()["data"]) == 1
+
+def test_invalid_sgpa_422(client):
+    assert client.post("/api/vtu/sgpa", json={"subjects": []}).status_code == 422
+
+def test_student_cannot_edit_reference(client, student_headers):
+    assert client.post("/api/admin/reference/degrees", json={"name": "B.E."}, headers=student_headers).status_code == 403
+
+def test_profile_dependent_validation(client, admin_headers, student_headers):
+    d = client.post("/api/admin/reference/districts", json={"state": "Karnataka", "name": "Mysuru"}, headers=admin_headers).get_json()["data"]
+    t = client.post("/api/admin/reference/taluks", json={"district_id": d["id"], "name": "Nanjangud"}, headers=admin_headers).get_json()["data"]
+    assert [x["name"] for x in client.get(f"/api/reference/taluks?district_id={d['id']}").get_json()["data"]] == ["Nanjangud"]
+    ok = client.patch("/api/students/profile", json={"state": "Karnataka", "district_id": d["id"], "taluk_id": t["id"]}, headers=student_headers)
+    assert ok.status_code == 200
+    prof = client.get("/api/students/profile", headers=student_headers).get_json()["data"]
+    assert prof["district"] == "Mysuru"                     # text column filled from id, persists across reload
+    bad = client.patch("/api/students/profile", json={"current_academic_year": 2, "current_semester": 5}, headers=student_headers)
+    assert bad.status_code == 422
+Copy
+3. Frontend
+frontend/src/lib/api-helpers.ts (new: fixes the response-shape mismatch)
+Copyexport type Page<T> = { items: T[]; total: number; page: number; pages: number };
+
+export function unwrap<T = any>(res: any): T {
+  const body = res?.data ?? res;
+  return (body && typeof body === "object" && "data" in body ? body.data : body) as T;
+}
+
+export function asPage<T>(res: any): Page<T> {
+  const d: any = unwrap(res);
+  const items: T[] = Array.isArray(d) ? d : d?.items ?? d?.results ?? d?.scholarships ?? [];
+  const meta = d?.meta ?? res?.data?.meta ?? {};
+  const total = meta.total ?? d?.total ?? items.length;
+  const per = meta.per_page ?? d?.per_page ?? (items.length || 1);
+  return { items, total, page: meta.page ?? d?.page ?? 1, pages: meta.pages ?? Math.max(1, Math.ceil(total / per)) };
+}
+
+export function fieldErrors(err: any): Record<string, string> {
+  const e = err?.response?.data?.error ?? err?.response?.data ?? {};
+  const f = e.fields ?? e.errors ?? e.details ?? {};
+  return Object.fromEntries(Object.entries(f).map(([k, v]) => [k, Array.isArray(v) ? String(v[0]) : String(v)]));
+}
+
+export function errorMessage(err: any, fallback = "Something went wrong"): string {
+  return err?.response?.data?.error?.message ?? err?.response?.data?.message ?? err?.message ?? fallback;
+}
+
+export const inr = (n?: number | string | null) =>
+  n == null || n === "" ? "—" : `₹${Number(n).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+frontend/src/components/SearchSelect.tsx (new: searchable dropdown with "Other / Not listed")
+Copyimport { Check, ChevronDown, Search } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+
+export type Opt = { value: string | number; label: string; hint?: string };
+const OTHER = "__other__";
+
+type Props = {
+  label: string; options: Opt[]; value: string | number | null | undefined;
+  onChange: (v: string | number | null) => void; placeholder?: string; disabled?: boolean;
+  loading?: boolean; error?: string; allowOther?: boolean; otherText?: string;
+  onOtherText?: (t: string) => void; required?: boolean; id?: string;
+};
+
+export default function SearchSelect(p: Props) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const [active, setActive] = useState(0);
+  const ref = useRef<HTMLDivElement>(null);
+  const isOther = p.allowOther && p.value == null && !!p.otherText;
+  const [otherMode, setOtherMode] = useState(isOther);
+  useEffect(() => setOtherMode(isOther), [isOther]);
+  useEffect(() => {
+    const close = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && setOpen(false);
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, []);
+  const filtered = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    const list = s ? p.options.filter((o) => o.label.toLowerCase().includes(s)) : p.options;
+    return [...list.slice(0, 200), ...(p.allowOther ? [{ value: OTHER, label: "Other / Not listed" }] : [])];
+  }, [q, p.options, p.allowOther]);
+  const selected = p.options.find((o) => String(o.value) === String(p.value));
+  const pick = (o: Opt) => {
+    if (o.value === OTHER) { setOtherMode(true); p.onChange(null); }
+    else { setOtherMode(false); p.onOtherText?.(""); p.onChange(o.value); }
+    setOpen(false); setQ("");
+  };
+  const id = p.id ?? `ss-${p.label.replace(/\W+/g, "-").toLowerCase()}`;
+  return (
+    <div ref={ref} className="relative">
+      <label htmlFor={id} className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-300">
+        {p.label}{p.required && <span className="text-red-500"> *</span>}
+      </label>
+      <button id={id} type="button" disabled={p.disabled} aria-haspopup="listbox" aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        className={`input flex w-full items-center justify-between text-left ${p.error ? "border-red-400" : ""} disabled:opacity-60`}>
+        <span className={selected || otherMode ? "" : "text-slate-400"}>
+          {p.loading ? "Loading…" : selected?.label ?? (otherMode ? "Other / Not listed" : p.placeholder ?? "Select")}
+        </span>
+        <ChevronDown className="h-4 w-4 text-slate-400" />
+      </button>
+      {open && (
+        <div className="absolute z-30 mt-1 w-full rounded-lg border border-slate-200 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-900">
+          <div className="flex items-center gap-2 border-b border-slate-100 px-3 py-2 dark:border-slate-800">
+            <Search className="h-4 w-4 text-slate-400" />
+            <input autoFocus value={q} onChange={(e) => { setQ(e.target.value); setActive(0); }}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowDown") setActive((a) => Math.min(a + 1, filtered.length - 1));
+                if (e.key === "ArrowUp") setActive((a) => Math.max(a - 1, 0));
+                if (e.key === "Enter") { e.preventDefault(); filtered[active] && pick(filtered[active]); }
+                if (e.key === "Escape") setOpen(false);
+              }}
+              placeholder="Type to search" className="w-full bg-transparent text-sm outline-none" />
+          </div>
+          <ul role="listbox" className="max-h-64 overflow-auto py-1 text-sm">
+            {filtered.length === 0 && <li className="px-3 py-2 text-slate-500">No matches</li>}
+            {filtered.map((o, i) => (
+              <li key={String(o.value)} role="option" aria-selected={String(o.value) === String(p.value)}
+                onMouseDown={(e) => { e.preventDefault(); pick(o); }}
+                className={`flex cursor-pointer items-center justify-between px-3 py-2 ${i === active ? "bg-royal-50 dark:bg-slate-800" : ""} ${o.value === OTHER ? "border-t border-slate-100 text-royal-700 dark:border-slate-800" : ""}`}>
+                <span>{o.label}{o.hint && <span className="ml-2 text-xs text-slate-400">{o.hint}</span>}</span>
+                {String(o.value) === String(p.value) && <Check className="h-4 w-4 text-royal-600" />}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {otherMode && p.onOtherText && (
+        <input className="input mt-2 w-full" placeholder={`Enter ${p.label.toLowerCase()}`} value={p.otherText ?? ""}
+          maxLength={200} onChange={(e) => p.onOtherText!(e.target.value)} />
+      )}
+      {p.error && <p className="mt-1 text-xs text-red-600">{p.error}</p>}
+    </div>
+  );
+}
+Copy
+frontend/src/hooks/useReference.ts (new)
+Copyimport { useEffect, useState } from "react";
+import api from "../api/client"; // CHECK: your axios instance path
+import { unwrap } from "../lib/api-helpers";
+import type { Opt } from "../components/SearchSelect";
+
+const cache = new Map<string, any[]>();
+
+export function useReference(kind: string, params: Record<string, any> = {}, enabled = true) {
+  const key = `${kind}?${new URLSearchParams(Object.entries(params).filter(([, v]) => v != null && v !== "") as any)}`;
+  const [items, setItems] = useState<any[]>(cache.get(key) ?? []);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!enabled) { setItems([]); return; }
+    if (cache.has(key)) { setItems(cache.get(key)!); return; }
+    let alive = true;
+    setLoading(true); setError(null);
+    api.get(`/reference/${key}`)
+      .then((r) => { const d = unwrap<any[]>(r) ?? []; cache.set(key, d); alive && setItems(d); })
+      .catch(() => alive && setError("Could not load options"))
+      .finally(() => alive && setLoading(false));
+    return () => { alive = false; };
+  }, [key, enabled]);
+  const options: Opt[] = items.map((i) => ({ value: i.id, label: i.name, hint: i.short_name ?? i.college_code ?? undefined }));
+  return { items, options, loading, error };
+}
+
+export function useRefMeta() {
+  const [meta, setMeta] = useState<any>(cache.get("__meta")?.[0] ?? null);
+  useEffect(() => {
+    if (meta) return;
+    api.get("/reference/meta").then((r) => { const d = unwrap(r); cache.set("__meta", [d]); setMeta(d); }).catch(() => {});
+  }, [meta]);
+  return meta;
+}
+Copy
+frontend/src/pages/student/ProfilePage.tsx (replaces the existing page)
+Copyimport { Loader2, Pencil, Save, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import api from "../../api/client";
+import SearchSelect from "../../components/SearchSelect";
+import { useToast } from "../../context/ToastContext";
+import { useReference, useRefMeta } from "../../hooks/useReference";
+import { errorMessage, fieldErrors, unwrap } from "../../lib/api-helpers";
+
+type P = Record<string, any>;
+const strOpts = (a?: string[]) => (a ?? []).map((s) => ({ value: s, label: s }));
+
+export default function ProfilePage() {
+  const toast = useToast();
+  const meta = useRefMeta();
+  const [saved, setSaved] = useState<P | null>(null);
+  const [f, setF] = useState<P>({});
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [errs, setErrs] = useState<Record<string, string>>({});
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [completion, setCompletion] = useState<{ percent: number; missing: string[] } | null>(null);
+
+  const load = () => Promise.all([api.get("/students/profile"), api.get("/students/profile/completion")])
+    .then(([p, c]) => { const d = unwrap<P>(p); setSaved(d); setF(d); setCompletion(unwrap(c)); })
+    .catch((e) => setLoadErr(errorMessage(e, "Could not load your profile")));
+  useEffect(() => { load(); }, []);
+
+  const set = (k: string, v: any, reset: string[] = []) =>
+    setF((o) => ({ ...o, [k]: v, ...Object.fromEntries(reset.map((r) => [r, null])) }));
+
+  const districts = useReference("districts", { state: f.state }, !!f.state);
+  const taluks = useReference("taluks", { district_id: f.district_id }, !!f.district_id);
+  const universities = useReference("universities");
+  const colleges = useReference("colleges", { university_id: f.university_id }, !!f.university_id);
+  const degrees = useReference("degrees");
+  const branches = useReference("branches", { degree_id: f.degree_id }, !!f.degree_id);
+  const semesters = useMemo(() => {
+    const y = Number(f.current_academic_year);
+    return (y ? [2 * y - 1, 2 * y] : Array.from({ length: 12 }, (_, i) => i + 1)).map((s) => ({ value: s, label: `Semester ${s}` }));
+  }, [f.current_academic_year]);
+
+  const validate = () => {
+    const e: Record<string, string> = {};
+    if (!f.full_name || f.full_name.trim().length < 2) e.full_name = "Enter your full name";
+    if (f.phone && !/^\+?[0-9]{10,13}$/.test(String(f.phone).replace(/\s/g, ""))) e.phone = "Enter a valid 10-digit mobile number";
+    if (f.annual_family_income !== "" && f.annual_family_income != null && Number(f.annual_family_income) < 0) e.annual_family_income = "Cannot be negative";
+    if (f.academic_cgpa && (Number(f.academic_cgpa) < 0 || Number(f.academic_cgpa) > 10)) e.academic_cgpa = "CGPA must be 0–10";
+    if (f.admission_year && f.graduation_year && Number(f.graduation_year) < Number(f.admission_year)) e.graduation_year = "Must be after admission year";
+    if (f.date_of_birth && new Date(f.date_of_birth) > new Date()) e.date_of_birth = "Date of birth cannot be in the future";
+    setErrs(e);
+    return !Object.keys(e).length;
+  };
+
+  const save = async () => {
+    if (!validate()) return toast.error("Please fix the highlighted fields");
+    const changed: P = {};
+    for (const k of Object.keys(f)) if (JSON.stringify(f[k]) !== JSON.stringify(saved?.[k])) changed[k] = f[k] === "" ? null : f[k];
+    ["id", "user_id", "email", "created_at", "updated_at", "avatar_url"].forEach((k) => delete changed[k]);
+    if (!Object.keys(changed).length) { setEditing(false); return; }
+    setBusy(true);
+    try {
+      await api.patch("/students/profile", changed);
+      await load();
+      setEditing(false); setErrs({});
+      toast.success("Profile saved");
+    } catch (e) {
+      setErrs(fieldErrors(e)); toast.error(errorMessage(e, "Could not save profile"));
+    } finally { setBusy(false); }
+  };
+
+  if (loadErr) return <div className="card p-6 text-red-600">{loadErr} <button className="btn-secondary ml-3" onClick={() => { setLoadErr(null); load(); }}>Retry</button></div>;
+  if (!saved) return <div className="flex justify-center p-16"><Loader2 className="h-6 w-6 animate-spin text-royal-600" /></div>;
+
+  const T = (k: string, label: string, type = "text", extra: P = {}) => (
+    <div>
+      <label className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-300" htmlFor={k}>{label}</label>
+      <input id={k} type={type} disabled={!editing} className={`input w-full ${errs[k] ? "border-red-400" : ""}`}
+        value={f[k] ?? ""} onChange={(e) => set(k, e.target.value)} {...extra} />
+      {errs[k] && <p className="mt-1 text-xs text-red-600">{errs[k]}</p>}
+    </div>
+  );
+  const S = (label: string, k: string, options: any[], extra: Partial<React.ComponentProps<typeof SearchSelect>> = {}) => (
+    <SearchSelect label={label} options={options} value={f[k]} disabled={!editing} error={errs[k]}
+      onChange={(v) => set(k, v)} {...extra} />
+  );
+  const Section = ({ title, children }: { title: string; children: React.ReactNode }) => (
+    <section className="card p-6">
+      <h2 className="mb-4 text-base font-semibold text-navy-900 dark:text-white">{title}</h2>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{children}</div>
+    </section>
+  );
+
+  return (
+    <div className="mx-auto max-w-6xl space-y-6">
+      <div className="card flex flex-col gap-4 p-6 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-xl font-semibold text-navy-900 dark:text-white">{saved.full_name || "Your profile"}</h1>
+          <p className="text-sm text-slate-500">{saved.email}</p>
+          {completion && (
+            <div className="mt-3 w-64">
+              <div className="mb-1 flex justify-between text-xs text-slate-500"><span>Profile completion</span><span>{completion.percent}%</span></div>
+              <div className="h-2 rounded-full bg-slate-100 dark:bg-slate-800"><div className="h-2 rounded-full bg-royal-600" style={{ width: `${completion.percent}%` }} /></div>
+            </div>
+          )}
+        </div>
+        {editing ? (
+          <div className="flex gap-2">
+            <button className="btn-secondary" disabled={busy} onClick={() => { setF(saved); setErrs({}); setEditing(false); }}><X className="h-4 w-4" />Cancel</button>
+            <button className="btn-primary" disabled={busy} onClick={save}>{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}Save changes</button>
+          </div>
+        ) : <button className="btn-primary" onClick={() => setEditing(true)}><Pencil className="h-4 w-4" />Edit profile</button>}
+      </div>
+
+      <Section title="Personal information">
+        {T("full_name", "Full name *")}
+        {T("phone", "Phone number", "tel")}
+        {S("Gender", "gender", strOpts(meta?.genders))}
+        {T("date_of_birth", "Date of birth", "date")}
+        <div className="sm:col-span-2">{T("address", "Address")}</div>
+      </Section>
+
+      <Section title="Location">
+        {S("State", "state", strOpts(meta?.states), { onChange: (v) => set("state", v, ["district_id", "taluk_id", "district", "taluk"]) })}
+        {S("District", "district_id", districts.options, { loading: districts.loading, disabled: !editing || !f.state, allowOther: true,
+          otherText: f.district_id ? "" : f.district, onOtherText: (t) => set("district", t),
+          onChange: (v) => set("district_id", v, ["taluk_id", "taluk"]), placeholder: f.state ? "Select district" : "Select state first" })}
+        {S("Taluk", "taluk_id", taluks.options, { loading: taluks.loading, disabled: !editing || !f.district_id, allowOther: true,
+          otherText: f.taluk_id ? "" : f.taluk, onOtherText: (t) => set("taluk", t), placeholder: f.district_id ? "Select taluk" : "Select district first" })}
+        {T("city", "City / Town")}
+      </Section>
+
+      <Section title="Education">
+        {S("University", "university_id", universities.options, { allowOther: true, loading: universities.loading,
+          otherText: f.university_id ? "" : f.university, onOtherText: (t) => set("university", t),
+          onChange: (v) => set("university_id", v, ["college_id", "college"]) })}
+        {S("College", "college_id", colleges.options, { allowOther: true, loading: colleges.loading,
+          otherText: f.college_id ? "" : f.college, onOtherText: (t) => set("college", t),
+          disabled: !editing || (!f.university_id && !f.university), placeholder: "Select university first" })}
+        {S("Education level", "education_level", strOpts(meta?.education_levels))}
+        {S("Degree", "degree_id", degrees.options, { allowOther: true, otherText: f.degree_id ? "" : f.degree,
+          onOtherText: (t) => set("degree", t), onChange: (v) => set("degree_id", v, ["branch_id", "branch"]) })}
+        {S("Branch", "branch_id", branches.options, { allowOther: true, otherText: f.branch_id ? "" : f.branch,
+          onOtherText: (t) => set("branch", t), disabled: !editing || (!f.degree_id && !f.degree) })}
+        {T("admission_year", "Admission year", "number", { min: 1990, max: 2100 })}
+        {S("Current academic year", "current_academic_year", [1, 2, 3, 4, 5, 6].map((y) => ({ value: y, label: `Year ${y}` })),
+          { onChange: (v) => set("current_academic_year", v, ["current_semester"]) })}
+        {S("Current semester", "current_semester", semesters)}
+        {T("graduation_year", "Expected graduation year", "number", { min: 1990, max: 2100 })}
+      </Section>
+
+      <Section title="Scholarship eligibility">
+        {S("Social category", "social_category", strOpts(meta?.social_categories))}
+        {T("annual_family_income", "Annual family income (₹)", "number", { min: 0, step: 1000 })}
+        {T("academic_cgpa", "Current CGPA", "number", { min: 0, max: 10, step: 0.01 })}
+        {T("academic_percentage", "Last exam percentage", "number", { min: 0, max: 100, step: 0.01 })}
+        <p className="text-xs text-slate-500 sm:col-span-3">Used only to match scholarships. SSS never asks for Aadhaar numbers, OTPs or government portal passwords.</p>
+      </Section>
+    </div>
+  );
+}
+Copy
+frontend/src/pages/student/ScholarshipsPage.tsx (replaces the discovery page)
+Copyimport { Bookmark, BookmarkCheck, ExternalLink, Loader2, RotateCcw, Search, Sparkles } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import api from "../../api/client";
+import SearchSelect from "../../components/SearchSelect";
+import { useToast } from "../../context/ToastContext";
+import { useReference, useRefMeta } from "../../hooks/useReference";
+import { asPage, errorMessage, inr, unwrap } from "../../lib/api-helpers";
+
+const KEYS = ["q", "state", "district", "education_level", "degree", "social_category", "scholarship_type",
+              "source_platform", "income", "deadline_before", "open_status", "sort", "page"];
+const STATUS = { open: "bg-emerald-50 text-emerald-700", closing_soon: "bg-amber-50 text-amber-700",
+                 closed: "bg-slate-100 text-slate-500", upcoming: "bg-royal-50 text-royal-700" } as Record<string, string>;
+const strOpts = (a?: string[]) => (a ?? []).map((s) => ({ value: s, label: s.replace(/_/g, " ") }));
+
+export default function ScholarshipsPage() {
+  const toast = useToast();
+  const meta = useRefMeta();
+  const [sp, setSp] = useSearchParams();
+  const filters = useMemo(() => Object.fromEntries(KEYS.map((k) => [k, sp.get(k) ?? ""])), [sp]);
+  const [qDraft, setQDraft] = useState(filters.q);
+  const [data, setData] = useState<{ items: any[]; total: number; pages: number } | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [match, setMatch] = useState<any | null>(null);
+  const [matchView, setMatchView] = useState<"" | "eligible" | "potential" | "ineligible">("");
+  const districts = useReference("districts", { state: filters.state }, !!filters.state);
+  const degrees = useReference("degrees");
+
+  const update = (patch: Record<string, string>) => {
+    const next = new URLSearchParams(sp);
+    Object.entries(patch).forEach(([k, v]) => (v ? next.set(k, v) : next.delete(k)));
+    if (!("page" in patch)) next.delete("page");
+    setSp(next, { replace: true });
+  };
+  const reset = () => { setQDraft(""); setMatchView(""); setSp(new URLSearchParams(), { replace: true }); };
+
+  useEffect(() => { const t = setTimeout(() => qDraft !== filters.q && update({ q: qDraft }), 350); return () => clearTimeout(t); }, [qDraft]);
+
+  const load = useCallback(() => {
+    setLoading(true); setErr(null);
+    const params = Object.fromEntries(Object.entries(filters).filter(([, v]) => v));
+    api.get("/scholarships", { params: { per_page: 12, ...params } })
+      .then((r) => setData(asPage(r)))
+      .catch((e) => setErr(errorMessage(e, "Could not load scholarships")))
+      .finally(() => setLoading(false));
+  }, [filters]);
+  useEffect(load, [load]);
+
+  const findForMe = async () => {
+    try { const m = unwrap<any>(await api.get("/scholarships/match")); setMatch(m); setMatchView("eligible"); }
+    catch (e) { toast.error(errorMessage(e, "Log in and complete your profile to use matching")); }
+  };
+  const toggleSave = async (s: any) => {
+    try {
+      if (s.is_tracked) await api.delete(`/tracking/${s.id}`); else await api.put(`/tracking/${s.id}`, {});
+      setData((d) => d && { ...d, items: d.items.map((x) => (x.id === s.id ? { ...x, is_tracked: !x.is_tracked } : x)) });
+    } catch (e) { toast.error(errorMessage(e)); }
+  };
+
+  const matchIds = matchView && match ? new Map(match[matchView].map((m: any) => [m.scholarship_id, m])) : null;
+  const items = (data?.items ?? []).filter((s) => !matchIds || matchIds.has(s.id));
+  const active = KEYS.filter((k) => k !== "page" && k !== "sort" && filters[k]).length;
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold text-navy-900 dark:text-white">Scholarship Hub</h1>
+          <p className="text-sm text-slate-500">Verified scholarships from official sources. Apply on the official portal.</p>
+        </div>
+        <button className="btn-primary" onClick={findForMe}><Sparkles className="h-4 w-4" />Find scholarships for me</button>
+      </div>
+
+      {match && (
+        <div className="card flex flex-wrap items-center gap-2 p-4 text-sm">
+          {(["eligible", "potential", "ineligible"] as const).map((k) => (
+            <button key={k} onClick={() => setMatchView(matchView === k ? "" : k)}
+              className={`rounded-full px-3 py-1 ${matchView === k ? "bg-navy-900 text-white" : "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200"}`}>
+              {k === "eligible" ? "Confirmed eligible" : k === "potential" ? "Possibly eligible" : "Not eligible"} ({match.counts[k]})
+            </button>
+          ))}
+          <span className="text-xs text-slate-500">{match.note}</span>
+        </div>
+      )}
+
+      <div className="card space-y-4 p-4">
+        <div className="relative">
+          <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+          <input className="input w-full pl-9" placeholder="Search by name, provider, course or keyword"
+            value={qDraft} onChange={(e) => setQDraft(e.target.value)} />
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <SearchSelect label="State" options={strOpts(meta?.states)} value={filters.state || null}
+            onChange={(v) => update({ state: String(v ?? ""), district: "" })} />
+          <SearchSelect label="District" options={districts.items.map((d) => ({ value: d.name, label: d.name }))}
+            value={filters.district || null} disabled={!filters.state} onChange={(v) => update({ district: String(v ?? "") })} />
+          <SearchSelect label="Education level" options={strOpts(meta?.education_levels)} value={filters.education_level || null}
+            onChange={(v) => update({ education_level: String(v ?? "") })} />
+          <SearchSelect label="Degree" options={degrees.items.map((d) => ({ value: d.name, label: d.name }))}
+            value={filters.degree || null} onChange={(v) => update({ degree: String(v ?? "") })} />
+          <SearchSelect label="Category" options={strOpts(meta?.social_categories)} value={filters.social_category || null}
+            onChange={(v) => update({ social_category: String(v ?? "") })} />
+          <SearchSelect label="Source" options={strOpts(meta?.source_platforms)} value={filters.source_platform || null}
+            onChange={(v) => update({ source_platform: String(v ?? "") })} />
+          <div>
+            <label className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-300">Annual family income (₹)</label>
+            <input className="input w-full" type="number" min={0} step={10000} value={filters.income}
+              onChange={(e) => update({ income: e.target.value })} placeholder="e.g. 250000" />
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-300">Deadline on or before</label>
+            <input className="input w-full" type="date" value={filters.deadline_before} onChange={(e) => update({ deadline_before: e.target.value })} />
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {["", "open", "closing_soon", "upcoming", "closed"].map((s) => (
+            <button key={s || "all"} onClick={() => update({ open_status: s })}
+              className={`rounded-full px-3 py-1 text-sm ${filters.open_status === s ? "bg-royal-600 text-white" : "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200"}`}>
+              {s ? s.replace("_", " ") : "All active"}
+            </button>
+          ))}
+          <select className="input ml-auto w-auto" value={filters.sort || "deadline"} onChange={(e) => update({ sort: e.target.value })} aria-label="Sort">
+            <option value="deadline">Deadline (soonest)</option><option value="amount">Amount (highest)</option><option value="newest">Newest</option>
+          </select>
+          {active > 0 && <button className="btn-secondary" onClick={reset}><RotateCcw className="h-4 w-4" />Reset ({active})</button>}
+        </div>
+      </div>
+
+      {loading ? <div className="flex justify-center p-16"><Loader2 className="h-6 w-6 animate-spin text-royal-600" /></div>
+       : err ? <div className="card p-6 text-red-600">{err} <button className="btn-secondary ml-2" onClick={load}>Retry</button></div>
+       : items.length === 0 ? (
+        <div className="card p-10 text-center">
+          <p className="font-medium text-navy-900 dark:text-white">No scholarships match these filters</p>
+          <p className="mt-1 text-sm text-slate-500">{active ? "Try removing some filters." : "No verified scholarships are published yet. Administrators add records only after checking the official source."}</p>
+          {active > 0 && <button className="btn-secondary mt-4" onClick={reset}>Reset filters</button>}
+        </div>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {items.map((s) => {
+            const m: any = matchIds?.get(s.id);
+            return (
+              <article key={s.id} className="card flex flex-col p-5">
+                <div className="mb-2 flex items-start justify-between gap-2">
+                  <span className={`rounded-full px-2 py-0.5 text-xs ${STATUS[s.open_status] ?? STATUS.open}`}>{(s.open_status ?? "open").replace("_", " ")}</span>
+                  <button aria-label={s.is_tracked ? "Remove bookmark" : "Bookmark"} onClick={() => toggleSave(s)} className="text-royal-600">
+                    {s.is_tracked ? <BookmarkCheck className="h-5 w-5" /> : <Bookmark className="h-5 w-5" />}
+                  </button>
+                </div>
+                <Link to={`/scholarships/${s.slug ?? s.id}`} className="font-semibold text-navy-900 hover:text-royal-700 dark:text-white">{s.title}</Link>
+                <p className="text-sm text-slate-500">{s.provider_name}</p>
+                <dl className="mt-3 grid grid-cols-2 gap-2 text-sm">
+                  <div><dt className="text-xs text-slate-400">Amount</dt><dd>{s.amount_text || inr(s.amount_max)}</dd></div>
+                  <div><dt className="text-xs text-slate-400">Deadline</dt><dd>{s.application_close_date ? new Date(s.application_close_date + "T00:00:00").toLocaleDateString("en-IN") : "Not announced"}</dd></div>
+                  <div className="col-span-2"><dt className="text-xs text-slate-400">Source</dt><dd className="truncate">{s.official_source_name}</dd></div>
+                </dl>
+                {m && <ul className="mt-3 space-y-1 text-xs text-slate-600 dark:text-slate-300">{[...m.failed, ...m.unknown].slice(0, 3).map((r: string) => <li key={r}>• {r}</li>)}</ul>}
+                <div className="mt-auto flex items-center justify-between pt-4 text-xs">
+                  <span className={s.verification_status === "verified" ? "text-emerald-700" : "text-amber-700"}>
+                    {s.verification_status}{s.last_verified_at && ` · ${new Date(s.last_verified_at).toLocaleDateString("en-IN")}`}
+                  </span>
+                  <a href={s.application_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-royal-700">Official site <ExternalLink className="h-3 w-3" /></a>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
+      {data && data.pages > 1 && (
+        <div className="flex justify-center gap-2">
+          <button className="btn-secondary" disabled={Number(filters.page || 1) <= 1} onClick={() => update({ page: String(Number(filters.page || 1) - 1) })}>Previous</button>
+          <span className="px-3 py-2 text-sm">Page {filters.page || 1} of {data.pages}</span>
+          <button className="btn-secondary" disabled={Number(filters.page || 1) >= data.pages} onClick={() => update({ page: String(Number(filters.page || 1) + 1) })}>Next</button>
+        </div>
+      )}
+    </div>
+  );
+}
+Copy
+Use the same response handling in your existing details page: const s = unwrap(res). Add the following below the eligibility list. It shows a "confirmed" list, a "check" list and a "fails" list, built from s.eligibility_check, plus s.application_process and an "Apply on official site" button that links to s.application_url with rel="noopener noreferrer":
+
+Copy{s.eligibility_check && (
+  <div className="card p-5 text-sm">
+    <h3 className="font-semibold">Your eligibility ({s.eligibility_check.status === "eligible" ? "confirmed" : s.eligibility_check.status === "potential" ? "possible – needs checks" : "not eligible"})</h3>
+    {s.eligibility_check.confirmed.map((r: string) => <p key={r} className="text-emerald-700">✓ {r}</p>)}
+    {s.eligibility_check.unknown.map((r: string) => <p key={r} className="text-amber-700">? {r}</p>)}
+    {s.eligibility_check.failed.map((r: string) => <p key={r} className="text-red-700">✕ {r}</p>)}
+  </div>
+)}
+frontend/src/pages/student/VtuCalculatorPage.tsx (new; mounted at /sgpa and /cgpa)
+Copyimport { Download, Loader2, Plus, RotateCcw, Save, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import api from "../../api/client";
+import { useAuth } from "../../context/AuthContext";
+import { useToast } from "../../context/ToastContext";
+import { errorMessage, fieldErrors, unwrap } from "../../lib/api-helpers";
+
+type Subj = { code: string; name: string; credits: string; mode: "grade" | "marks"; grade: string; total: string; cie: string; see: string; absent: boolean; grade_point: string };
+type Sem = { semester: string; sgpa: string; credits: string };
+const blankS = (): Subj => ({ code: "", name: "", credits: "", mode: "grade", grade: "", total: "", cie: "", see: "", absent: false, grade_point: "" });
+
+export default function VtuCalculatorPage({ mode }: { mode: "sgpa" | "cgpa" }) {
+  const { user } = useAuth();
+  const toast = useToast();
+  const [schemes, setSchemes] = useState<any[]>([]);
+  const [schemeId, setSchemeId] = useState<string>("");
+  const [scheme, setScheme] = useState<any | null>(null);
+  const [semester, setSemester] = useState("");
+  const [subjects, setSubjects] = useState<Subj[]>([blankS()]);
+  const [sems, setSems] = useState<Sem[]>([{ semester: "1", sgpa: "", credits: "" }]);
+  const [result, setResult] = useState<any | null>(null);
+  const [errs, setErrs] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [history, setHistory] = useState<any[]>([]);
+
+  useEffect(() => { api.get("/vtu/schemes").then((r) => setSchemes(unwrap(r) ?? [])).catch(() => {}); }, []);
+  useEffect(() => {
+    setScheme(null); setResult(null);
+    if (schemeId) api.get(`/vtu/schemes/${schemeId}`).then((r) => setScheme(unwrap(r))).catch((e) => toast.error(errorMessage(e)));
+  }, [schemeId]);
+  const loadHistory = () => user && api.get(`/vtu/history?kind=${mode}`).then((r) => setHistory(unwrap(r) ?? [])).catch(() => {});
+  useEffect(() => { loadHistory(); }, [user, mode]);
+
+  const loadCurriculum = async () => {
+    if (!semester) return toast.error("Select a semester first");
+    const list = unwrap<any[]>(await api.get(`/vtu/schemes/${schemeId}/curriculum`, { params: { semester } })) ?? [];
+    if (!list.length) return toast.info?.("No verified curriculum for this semester. Enter subjects manually.") ?? toast.error("No verified curriculum available");
+    setSubjects(list.map((c) => ({ ...blankS(), code: c.course_code, name: c.course_title, credits: String(c.credits) })));
+  };
+
+  const calc = async (save = false) => {
+    setBusy(true); setErrs({});
+    try {
+      const body = mode === "sgpa"
+        ? { scheme_id: schemeId || null, semester: semester || null, save, subjects: subjects.map((s) => schemeId
+            ? { code: s.code, name: s.name, credits: s.credits, absent: s.absent, mode: s.mode,
+                ...(s.mode === "grade" ? { grade: s.grade } : s.cie || s.see ? { cie: s.cie, see: s.see } : { total: s.total }) }
+            : { code: s.code, name: s.name, credits: s.credits, grade_point: s.grade_point }) }
+        : { scheme_id: schemeId || null, save, semesters: sems };
+      const r = unwrap<any>(await api.post(`/vtu/${mode}`, body));
+      setResult(r);
+      if (save) { toast.success("Saved to history"); loadHistory(); }
+    } catch (e) { setErrs(fieldErrors(e)); setResult(null); toast.error(errorMessage(e, "Please check your inputs")); }
+    finally { setBusy(false); }
+  };
+  const reset = () => { setSubjects([blankS()]); setSems([{ semester: "1", sgpa: "", credits: "" }]); setResult(null); setErrs({}); };
+  const E = (k: string) => errs[k] && <p className="mt-1 text-xs text-red-600">{errs[k]}</p>;
+  const upd = <T,>(arr: T[], set: (a: T[]) => void, i: number, patch: Partial<T>) => set(arr.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+
+  return (
+    <div className="space-y-6 print:space-y-2">
+      <div>
+        <h1 className="text-2xl font-semibold text-navy-900 dark:text-white">VTU {mode.toUpperCase()} Calculator</h1>
+        <p className="text-sm text-slate-500">Uses only grading schemes an administrator has verified against official VTU regulations.</p>
+      </div>
+
+      <div className="card grid gap-4 p-5 sm:grid-cols-3 print:hidden">
+        <div><label className="mb-1 block text-sm font-medium">University</label><input className="input w-full" disabled value="Visvesvaraya Technological University (VTU)" /></div>
+        <div>
+          <label className="mb-1 block text-sm font-medium">Scheme</label>
+          <select className="input w-full" value={schemeId} onChange={(e) => setSchemeId(e.target.value)}>
+            <option value="">{schemes.length ? "Manual entry (no scheme)" : "No verified schemes yet: manual entry"}</option>
+            {schemes.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </div>
+        {mode === "sgpa" && (
+          <div>
+            <label className="mb-1 block text-sm font-medium">Semester</label>
+            <div className="flex gap-2">
+              <select className="input w-full" value={semester} onChange={(e) => setSemester(e.target.value)}>
+                <option value="">Select</option>{Array.from({ length: 8 }, (_, i) => <option key={i} value={i + 1}>Semester {i + 1}</option>)}
+              </select>
+              {scheme?.curriculum?.semesters?.length > 0 && <button className="btn-secondary whitespace-nowrap" onClick={loadCurriculum}>Load subjects</button>}
+            </div>
+          </div>
+        )}
+        {scheme && <p className="text-xs text-slate-500 sm:col-span-3">Source: <a className="text-royal-700 underline" href={scheme.regulation_url} target="_blank" rel="noopener noreferrer">{scheme.regulation_title || scheme.regulation_url}</a> · verified {scheme.verified_at && new Date(scheme.verified_at).toLocaleDateString("en-IN")}</p>}
+        {!schemeId && <p className="text-xs text-amber-700 sm:col-span-3">Manual mode: you enter grade points yourself; pass/fail rules are not applied.</p>}
+      </div>
+
+      {mode === "sgpa" ? (
+        <div className="card overflow-x-auto p-5 print:hidden">
+          <table className="table w-full min-w-[720px]">
+            <thead><tr><th>Code</th><th>Subject</th><th>Credits</th>{schemeId ? <><th>Input</th><th>Grade / Marks</th><th>Absent</th></> : <th>Grade point</th>}<th /></tr></thead>
+            <tbody>{subjects.map((s, i) => (
+              <tr key={i}>
+                <td><input className="input w-24" value={s.code} onChange={(e) => upd(subjects, setSubjects, i, { code: e.target.value })} />{E(`subjects[${i}].code`)}</td>
+                <td><input className="input w-full" value={s.name} onChange={(e) => upd(subjects, setSubjects, i, { name: e.target.value })} />{E(`subjects[${i}].name`)}</td>
+                <td><input className="input w-20" type="number" min={0} step={0.5} value={s.credits} onChange={(e) => upd(subjects, setSubjects, i, { credits: e.target.value })} />{E(`subjects[${i}].credits`)}</td>
+                {schemeId ? <>
+                  <td><select className="input" value={s.mode} onChange={(e) => upd(subjects, setSubjects, i, { mode: e.target.value as any })}><option value="grade">Grade</option><option value="marks">Marks</option></select></td>
+                  <td>{s.mode === "grade"
+                    ? <select className="input w-24" value={s.grade} disabled={s.absent} onChange={(e) => upd(subjects, setSubjects, i, { grade: e.target.value })}><option value="">—</option>{scheme?.bands?.filter((b: any) => !b.is_absent).map((b: any) => <option key={b.label}>{b.label}</option>)}</select>
+                    : scheme?.rules?.cie_max
+                      ? <div className="flex gap-1"><input className="input w-20" placeholder={`CIE/${scheme.rules.cie_max}`} value={s.cie} disabled={s.absent} onChange={(e) => upd(subjects, setSubjects, i, { cie: e.target.value })} /><input className="input w-20" placeholder={`SEE/${scheme.rules.see_max}`} value={s.see} disabled={s.absent} onChange={(e) => upd(subjects, setSubjects, i, { see: e.target.value })} /></div>
+                      : <input className="input w-24" placeholder={`/${scheme?.rules?.max_total_marks}`} value={s.total} onChange={(e) => upd(subjects, setSubjects, i, { total: e.target.value })} />}
+                    {E(`subjects[${i}].grade`)}{E(`subjects[${i}].total`)}{E(`subjects[${i}].cie`)}{E(`subjects[${i}].see`)}</td>
+                  <td><input type="checkbox" checked={s.absent} onChange={(e) => upd(subjects, setSubjects, i, { absent: e.target.checked })} aria-label="Absent" /></td>
+                </> : <td><input className="input w-20" type="number" min={0} max={10} value={s.grade_point} onChange={(e) => upd(subjects, setSubjects, i, { grade_point: e.target.value })} />{E(`subjects[${i}].grade_point`)}</td>}
+                <td><button aria-label="Remove subject" disabled={subjects.length === 1} onClick={() => setSubjects(subjects.filter((_, j) => j !== i))} className="text-slate-400 hover:text-red-600 disabled:opacity-30"><Trash2 className="h-4 w-4" /></button></td>
+              </tr>))}</tbody>
+          </table>
+          {E("subjects")}
+          <button className="btn-secondary mt-3" onClick={() => setSubjects([...subjects, blankS()])}><Plus className="h-4 w-4" />Add subject</button>
+        </div>
+      ) : (
+        <div className="card overflow-x-auto p-5 print:hidden">
+          <table className="table w-full min-w-[480px]">
+            <thead><tr><th>Semester</th><th>SGPA</th><th>Total credits</th><th /></tr></thead>
+            <tbody>{sems.map((s, i) => (
+              <tr key={i}>
+                <td><input className="input w-20" type="number" min={1} max={12} value={s.semester} onChange={(e) => upd(sems, setSems, i, { semester: e.target.value })} />{E(`semesters[${i}].semester`)}</td>
+                <td><input className="input w-24" type="number" min={0} max={10} step={0.01} value={s.sgpa} onChange={(e) => upd(sems, setSems, i, { sgpa: e.target.value })} />{E(`semesters[${i}].sgpa`)}</td>
+                <td><input className="input w-24" type="number" min={0.5} step={0.5} value={s.credits} onChange={(e) => upd(sems, setSems, i, { credits: e.target.value })} />{E(`semesters[${i}].credits`)}</td>
+                <td><button aria-label="Remove semester" disabled={sems.length === 1} onClick={() => setSems(sems.filter((_, j) => j !== i))} className="text-slate-400 hover:text-red-600 disabled:opacity-30"><Trash2 className="h-4 w-4" /></button></td>
+              </tr>))}</tbody>
+          </table>
+          <button className="btn-secondary mt-3" onClick={() => setSems([...sems, { semester: String(Math.max(0, ...sems.map((s) => Number(s.semester) || 0)) + 1), sgpa: "", credits: "" }])}><Plus className="h-4 w-4" />Add semester</button>
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-2 print:hidden">
+        <button className="btn-primary" disabled={busy} onClick={() => calc(false)}>{busy && <Loader2 className="h-4 w-4 animate-spin" />}Calculate {mode.toUpperCase()}</button>
+        {user && <button className="btn-secondary" disabled={busy} onClick={() => calc(true)}><Save className="h-4 w-4" />Calculate & save</button>}
+        <button className="btn-secondary" onClick={reset}><RotateCcw className="h-4 w-4" />Reset</button>
+        {result && <button className="btn-secondary" onClick={() => window.print()}><Download className="h-4 w-4" />Print / save PDF</button>}
+      </div>
+
+      {result && (
+        <section className="card p-5">
+          <div className="mb-4 flex flex-wrap items-baseline gap-6">
+            <div><p className="text-xs uppercase text-slate-500">{mode.toUpperCase()}</p><p className="text-3xl font-semibold text-navy-900 dark:text-white">{result[mode]}</p></div>
+            <div><p className="text-xs text-slate-500">Total credits</p><p className="font-medium">{result.total_credits}</p></div>
+            <div><p className="text-xs text-slate-500">Total credit points</p><p className="font-medium">{result.total_credit_points}</p></div>
+            {mode === "sgpa" && <div><p className="text-xs text-slate-500">Result</p><p className="font-medium">{result.result_status}</p></div>}
+            {result.percentage && <div><p className="text-xs text-slate-500">Percentage</p><p className="font-medium">{result.percentage}% <a className="text-xs text-royal-700 underline" href={result.percentage_basis.source_url} target="_blank" rel="noopener noreferrer">basis</a></p></div>}
+            {result.classification && <div><p className="text-xs text-slate-500">Classification</p><p className="font-medium">{result.classification}</p></div>}
+          </div>
+          <div className="overflow-x-auto"><table className="table w-full">
+            {mode === "sgpa"
+              ? <><thead><tr><th>Subject</th><th>Credits</th><th>Grade</th><th>Grade points</th><th>Credit points</th><th>Status</th></tr></thead>
+                 <tbody>{result.rows.map((r: any, i: number) => <tr key={i}><td>{r.code} {r.name}</td><td>{r.credits}</td><td>{r.grade ?? "—"}</td><td>{r.grade_point}</td><td>{r.credit_points}</td><td>{r.passed == null ? "—" : r.passed ? "Pass" : r.note ?? "Fail"}</td></tr>)}</tbody></>
+              : <><thead><tr><th>Semester</th><th>SGPA</th><th>Credits</th><th>Credit points</th></tr></thead>
+                 <tbody>{result.rows.map((r: any) => <tr key={r.semester}><td>{r.semester}</td><td>{r.sgpa}</td><td>{r.credits}</td><td>{r.credit_points}</td></tr>)}</tbody></>}
+          </table></div>
+          {result.assumptions?.length > 0 && <ul className="mt-4 space-y-1 text-xs text-slate-500">{result.assumptions.map((a: string) => <li key={a}>• {a}</li>)}</ul>}
+        </section>
+      )}
+
+      {user && history.length > 0 && (
+        <section className="card p-5 print:hidden">
+          <h2 className="mb-3 font-semibold">History</h2>
+          <ul className="divide-y divide-slate-100 text-sm dark:divide-slate-800">{history.map((h) => (
+            <li key={h.id} className="flex items-center justify-between py-2">
+              <span>{new Date(h.created_at).toLocaleString("en-IN")} · {h.kind.toUpperCase()} {h.result?.[h.kind]}{h.semester ? ` · Sem ${h.semester}` : ""}</span>
+              <span className="flex gap-3">
+                <button className="text-royal-700" onClick={() => {
+                  if (h.kind === "cgpa") setSems(h.input.semesters.map((s: any) => ({ semester: String(s.semester), sgpa: String(s.sgpa), credits: String(s.credits) })));
+                  else setSubjects(h.input.subjects.map((s: any) => ({ ...blankS(), ...Object.fromEntries(Object.entries(s).map(([k, v]) => [k, typeof v === "boolean" ? v : String(v ?? "")])) })));
+                  setSchemeId(h.scheme_id ? String(h.scheme_id) : ""); setResult(h.result);
+                }}>Edit</button>
+                <button className="text-red-600" onClick={async () => { await api.delete(`/vtu/history/${h.id}`); loadHistory(); }}>Delete</button>
+              </span>
+            </li>))}</ul>
+        </section>
+      )}
+    </div>
+  );
+}
+Copy
+In App.tsx, change the routes to <Route path="/sgpa" element={<VtuCalculatorPage mode="sgpa" />} /> and <Route path="/cgpa" element={<VtuCalculatorPage mode="cgpa" />} />. Your existing /semesters page (the stored semester records) stays where it is.
+
+Dashboard additions (pages/student/DashboardPage.tsx)
+Read the response with unwrap(res), then add these blocks to the existing grid. The current stat cards and charts stay.
+
+Copy<div className="card flex items-center gap-4 p-5">
+  <div className="flex h-14 w-14 items-center justify-center rounded-full bg-navy-900 text-lg font-semibold text-white">
+    {d.profile?.full_name?.split(" ").map((x: string) => x[0]).slice(0, 2).join("") || "S"}
+  </div>
+  <div className="flex-1">
+    <p className="font-semibold text-navy-900 dark:text-white">{d.profile?.full_name}</p>
+    <p className="text-sm text-slate-500">{[d.profile?.degree, d.profile?.branch, d.profile?.current_semester && `Sem ${d.profile.current_semester}`].filter(Boolean).join(" · ") || "Complete your education details"}</p>
+    <div className="mt-2 h-1.5 rounded-full bg-slate-100"><div className="h-1.5 rounded-full bg-royal-600" style={{ width: `${d.profile_completion?.percent ?? 0}%` }} /></div>
+    <p className="mt-1 text-xs text-slate-500">Profile {d.profile_completion?.percent ?? 0}% complete</p>
+  </div>
+  <Link to="/profile" className="btn-secondary">Edit</Link>
+</div>
+<div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+  {[["/sgpa", "SGPA calculator", Calculator], ["/cgpa", "CGPA calculator", LineChart], ["/profile", "My profile", User], ["/scholarships", "Scholarships", GraduationCap]].map(([to, label, Icon]: any) => (
+    <Link key={to} to={to} className="card flex items-center gap-3 p-4 hover:border-royal-200"><Icon className="h-5 w-5 text-royal-600" /><span className="text-sm font-medium">{label}</span></Link>
+  ))}
+</div>
+<div className="card p-5">
+  <h2 className="mb-3 font-semibold">Recommended for you <span className="text-xs font-normal text-slate-500">({d.match_counts?.eligible ?? 0} confirmed · {d.match_counts?.potential ?? 0} possible)</span></h2>
+  {d.recommendations?.length ? d.recommendations.map((r: any) => (
+    <Link key={r.scholarship_id} to={`/scholarships/${r.scholarship_id}`} className="block border-b border-slate-100 py-2 text-sm last:border-0 dark:border-slate-800">
+      #{r.scholarship_id} · <span className={r.status === "eligible" ? "text-emerald-700" : "text-amber-700"}>{r.status === "eligible" ? "Eligible" : "Possibly eligible"}</span>
+    </Link>)) : <p className="text-sm text-slate-500">No matches yet. Complete your profile or check back after new scholarships are verified.</p>}
+</div>
+The recommendation list currently shows IDs. To show titles, add "title": s.title to each bucket entry in match_for. It's a one-line change: {"scholarship_id": s.id, "title": s.title, **r}. Then render r.title.
+
+Admin pages (new: pages/admin/AdminReferencePage.tsx, AdminSchemesPage.tsx)
+Copy// AdminReferencePage.tsx — CRUD + CSV import for all six reference types
+import { useEffect, useState } from "react";
+import api from "../../api/client";
+import { useToast } from "../../context/ToastContext";
+import { asPage, errorMessage } from "../../lib/api-helpers";
+
+const KINDS: Record<string, string[]> = {
+  districts: ["state", "name", "former_name", "lgd_code"], taluks: ["district_id", "name", "lgd_code"],
+  universities: ["name", "short_name", "state", "aishe_code", "source_url"],
+  colleges: ["university_id", "name", "college_code", "aishe_code", "district_id", "city", "source_url"],
+  degrees: ["name", "education_level"], branches: ["degree_id", "name"],
+};
+
+export default function AdminReferencePage() {
+  const toast = useToast();
+  const [kind, setKind] = useState("districts");
+  const [rows, setRows] = useState<any[]>([]);
+  const [q, setQ] = useState("");
+  const [form, setForm] = useState<Record<string, any>>({});
+  const [editId, setEditId] = useState<number | null>(null);
+  const [src, setSrc] = useState("");
+  const load = () => api.get(`/admin/reference/${kind}`, { params: { q, per_page: 200 } }).then((r) => setRows(asPage(r).items)).catch((e) => toast.error(errorMessage(e)));
+  useEffect(() => { load(); setForm({}); setEditId(null); }, [kind]);
+  const submit = async () => {
+    try {
+      if (editId) await api.patch(`/admin/reference/${kind}/${editId}`, form); else await api.post(`/admin/reference/${kind}`, form);
+      toast.success("Saved"); setForm({}); setEditId(null); load();
+    } catch (e) { toast.error(errorMessage(e)); }
+  };
+  const upload = async (file?: File) => {
+    if (!file) return;
+    const fd = new FormData(); fd.append("file", file); if (src) fd.append("source_url", src);
+    try { const r: any = (await api.post(`/admin/reference/${kind}/import`, fd)).data?.data;
+      toast.success(`Created ${r.created}, updated ${r.updated}, errors ${r.errors.length}`); load(); }
+    catch (e) { toast.error(errorMessage(e)); }
+  };
+  return (
+    <div className="space-y-4">
+      <h1 className="text-2xl font-semibold text-navy-900 dark:text-white">Reference data</h1>
+      <div className="flex flex-wrap gap-2">{Object.keys(KINDS).map((k) => <button key={k} onClick={() => setKind(k)} className={`rounded-full px-3 py-1 text-sm ${k === kind ? "bg-navy-900 text-white" : "bg-slate-100"}`}>{k}</button>)}</div>
+      <div className="card grid gap-3 p-4 sm:grid-cols-4">
+        {KINDS[kind].map((f) => <input key={f} className="input" placeholder={f} value={form[f] ?? ""} onChange={(e) => setForm({ ...form, [f]: e.target.value })} />)}
+        <button className="btn-primary" onClick={submit}>{editId ? "Update" : "Add"}</button>
+      </div>
+      <div className="card flex flex-wrap items-center gap-3 p-4 text-sm">
+        <input className="input flex-1" placeholder="Official source URL for this file (LGD / AISHE / UGC / VTU)" value={src} onChange={(e) => setSrc(e.target.value)} />
+        <label className="btn-secondary cursor-pointer">Import CSV<input type="file" accept=".csv,text/csv" hidden onChange={(e) => upload(e.target.files?.[0])} /></label>
+      </div>
+      <div className="card overflow-x-auto p-4">
+        <input className="input mb-3 w-64" placeholder="Search" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && load()} />
+        <table className="table w-full"><thead><tr>{KINDS[kind].map((f) => <th key={f}>{f}</th>)}<th /></tr></thead>
+          <tbody>{rows.map((r) => <tr key={r.id}>{KINDS[kind].map((f) => <td key={f}>{String(r[f] ?? "")}</td>)}
+            <td className="whitespace-nowrap"><button className="text-royal-700" onClick={() => { setEditId(r.id); setForm(r); }}>Edit</button>
+              <button className="ml-3 text-red-600" onClick={async () => { if (confirm("Delete this record?")) { await api.delete(`/admin/reference/${kind}/${r.id}`).catch((e) => toast.error(errorMessage(e))); load(); } }}>Delete</button></td></tr>)}
+          </tbody></table>
+        {!rows.length && <p className="p-4 text-sm text-slate-500">No records. Import an official list.</p>}
+      </div>
+    </div>
+  );
+}
+Copy
+Copy// AdminSchemesPage.tsx — list, edit rules JSON, bands, verify, publish, curriculum import
+import { useEffect, useState } from "react";
+import api from "../../api/client";
+import { useToast } from "../../context/ToastContext";
+import { errorMessage, unwrap } from "../../lib/api-helpers";
+
+export default function AdminSchemesPage() {
+  const toast = useToast();
+  const [list, setList] = useState<any[]>([]);
+  const [sel, setSel] = useState<any | null>(null);
+  const [rules, setRules] = useState("");
+  const [bands, setBands] = useState("");
+  const load = () => api.get("/admin/schemes").then((r) => setList(unwrap(r) ?? []));
+  const open = async (id: number) => {
+    const s = unwrap<any>(await api.get(`/admin/schemes/${id}`)); setSel(s);
+    setRules(JSON.stringify({ name: s.name, regulation_title: s.regulation_title, regulation_url: s.regulation_url, ...s.rules,
+      percentage_formula: s.percentage_formula, classification: s.classification, notes: s.notes }, null, 2));
+    setBands(JSON.stringify(s.bands, null, 2));
+  };
+  useEffect(() => { load(); }, []);
+  const act = async (fn: () => Promise<any>, msg: string) => {
+    try { await fn(); toast.success(msg); await open(sel.id); load(); } catch (e) { toast.error(errorMessage(e)); }
+  };
+  return (
+    <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
+      <div className="card p-4">
+        <h1 className="mb-3 font-semibold">Academic schemes</h1>
+        {list.map((s) => <button key={s.id} onClick={() => open(s.id)} className="block w-full rounded px-2 py-2 text-left text-sm hover:bg-slate-50">
+          {s.name}<span className="block text-xs text-slate-500">{s.verification_status}{s.is_published ? " · published" : ""}</span></button>)}
+        {!list.length && <p className="text-sm text-slate-500">None yet. Run <code>flask seed-vtu-draft</code> or create via API.</p>}
+      </div>
+      {sel && <div className="space-y-4">
+        <div className="card p-4 text-sm"><b>{sel.name}</b>: {sel.verification_status}. Edits to rules or bands send a verified scheme back to “needs review” and unpublish it.</div>
+        <div className="card p-4"><h2 className="mb-2 font-semibold">Rules</h2>
+          <textarea className="input h-72 w-full font-mono text-xs" value={rules} onChange={(e) => setRules(e.target.value)} />
+          <button className="btn-primary mt-2" onClick={() => act(() => api.patch(`/admin/schemes/${sel.id}`, JSON.parse(rules)), "Rules saved")}>Save rules</button></div>
+        <div className="card p-4"><h2 className="mb-2 font-semibold">Grade bands</h2>
+          <textarea className="input h-72 w-full font-mono text-xs" value={bands} onChange={(e) => setBands(e.target.value)} />
+          <button className="btn-primary mt-2" onClick={() => act(() => api.put(`/admin/schemes/${sel.id}/bands`, JSON.parse(bands)), "Bands saved")}>Save bands</button></div>
+        <div className="card flex flex-wrap gap-2 p-4">
+          <button className="btn-primary" onClick={() => act(() => api.post(`/admin/schemes/${sel.id}/verify`, {}), "Verified")}>Mark verified against regulation</button>
+          <button className="btn-secondary" onClick={() => act(() => api.post(`/admin/schemes/${sel.id}/publish`, { published: !sel.is_published }), sel.is_published ? "Unpublished" : "Published")}>{sel.is_published ? "Unpublish" : "Publish"}</button>
+          <label className="btn-secondary cursor-pointer">Import curriculum CSV<input type="file" hidden accept=".csv" onChange={(e) => { const f = e.target.files?.[0]; if (!f) return; const fd = new FormData(); fd.append("file", f);
+            act(() => api.post(`/admin/schemes/${sel.id}/curriculum/import`, fd), "Curriculum imported"); }} /></label>
+        </div>
+      </div>}
+    </div>
+  );
+}
+Copy
+Add routes /admin/reference and /admin/schemes inside your existing admin RequireAuth, plus matching sidebar links (icons: Database, BookOpen). In the admin scholarship list, add Archive/Unarchive buttons and an "Archive expired" button that call the endpoints above. Add form fields for district, source_platform (a select built from meta.source_platforms), application_process and course_requirements.
+
+4. Run, migrate and test
+Copy# backend
+cd backend && source .venv/bin/activate
+mysqldump -u root -p sss > ../backup_before_0002.sql      # back up first
+flask db upgrade                                          # applies 0002 (additive only)
+flask scholarships diagnose                               # explains the empty Scholarship Hub
+flask seed-vtu-draft ../database/reference/vtu_schemes_draft.json   # loads UNVERIFIED drafts
+pytest -q                                                 # existing + new tests
+flask run --host 127.0.0.1 --port 5000
+# load Karnataka districts: Admin → Reference data → districts → Import CSV (database/reference/karnataka_districts.csv)
+# frontend
+cd ../frontend && npm install && npm run dev               # http://localhost:5173
+npx tsc --noEmit && npm run build
+New API endpoints:
+
+Public: GET /api/reference/meta and GET /api/reference/{districts|taluks|universities|colleges|degrees|branches} (filters: state, district_id, university_id, degree_id, q).
+VTU calculator: GET /api/vtu/schemes, GET /api/vtu/schemes/:id, GET /api/vtu/schemes/:id/curriculum, POST /api/vtu/sgpa, POST /api/vtu/cgpa; history at GET/DELETE /api/vtu/history (needs login).
+Scholarships: GET /api/scholarships/match and GET /api/students/profile/completion. GET /api/scholarships gains the filters district, source_platform, social_category, degree and open_status, plus sort=amount.
+Admin: /api/admin/reference/:kind (list, create, update, delete, import), /api/admin/schemes (create, update, /bands, /verify, /publish, /curriculum/import), /api/admin/scholarships/:id/archive|unarchive, /api/admin/scholarships/archive-expired, /api/admin/activity.
+5. What you need to know about this delivery
+Tests weren't run. The calculator test file covers weighted SGPA, failed and absent subjects, the SEE minimum, marks falling between grade bands, validation errors, weighted CGPA versus a simple average, and percentage conversion only when a source is given. I checked every expected value by hand: 69/8 = 8.625 → 8.63; 30/6 = 5.00; 330/45 = 7.333 → 7.33; (8 − 0.75) × 10 = 72.50; 50/6 = 8.333 → 8.33. The API tests need your conftest fixtures. Nothing was run here, so run pytest and npm run build and expect a few import paths to need adjusting.
+
+Check these places against your real code:
+
+the log_action signature (the adapter is meant to absorb this);
+the names of your auth decorators, current_admin() and the ok() helper;
+the axios path ../api/client;
+the conftest fixture names;
+the tracking endpoints (PUT/DELETE /tracking/:id);
+the user.role attribute and the AdminLog.to_dict method;
+the migration's down_revision.
+VTU support:
+
+What works now: the calculator engine handles any scheme stored in the database, including grade-based and marks-based input, a CIE/SEE split, minimum pass marks, absent subjects, configurable rounding, and whether failed credits count. A percentage conversion and classification are shown only if an admin has entered them with an official source URL.
+What's left to do: none of the 2018, 2021 or 2022 data is verified. It's a draft you have to check against the VTU regulation PDFs before you verify and publish it. Students can use manual mode until then.
+Scholarship data: no scholarship records are included, and none were made up. NSP, SSP, Buddy4Study and Vidyasaarathi don't offer a public API I could confirm, so records go in through the admin form or CSV with an official source URL. Every record starts unverified and unpublished. Expired records are archived, and the cards show verification status and the date last checked. Buddy4Study and Vidyasaarathi are aggregators, so a record found there should be traced back to the original provider's page.
+
+Reference data:
+
+Included: the list of 31 Karnataka districts, with the Ramanagara rename noted as unconfirmed.
+You need to import: taluks, universities, colleges, degrees and branches, using official downloads from LGD, AISHE, UGC and VTU through the admin CSV import.
+Fallback: every dropdown has an "Other / Not listed" option until those lists are loaded.
+Not done: profile picture upload (the avatar_path column exists, but there's no upload endpoint or UI yet; the dashboard shows initials instead), testing of the responsive layouts in a real browser, SMS delivery (unchanged; only sent when a provider is configured), and a PDF for the new calculator (it uses the browser's print/save-as-PDF; the existing /academics/report.pdf still works).
