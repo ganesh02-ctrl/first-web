@@ -1,10 +1,16 @@
+databases:
+  - name: sss-db
+    databaseName: sss_db
+    user: sss_user
+    plan: free
+
 services:
   # ---- Backend Web Service ----
   - type: web
     name: sss-backend
     env: python
     region: oregon
-    plan: starter
+    plan: free
     rootDir: backend
     buildCommand: "pip install -r requirements.txt"
     startCommand: "flask --app run.py db upgrade && waitress-serve --host=0.0.0.0 --port=$PORT run:app"
@@ -22,42 +28,17 @@ services:
         value: "14"
       - key: BCRYPT_ROUNDS
         value: "12"
-      - key: MYSQL_HOST
+      - key: DATABASE_URL
         fromDatabase:
           name: sss-db
-          property: host
-      - key: MYSQL_PORT
-        fromDatabase:
-          name: sss-db
-          property: port
-      - key: MYSQL_DATABASE
-        fromDatabase:
-          name: sss-db
-          property: database
-      - key: MYSQL_USER
-        fromDatabase:
-          name: sss-db
-          property: user
-      - key: MYSQL_PASSWORD
-        fromDatabase:
-          name: sss-db
-          property: password
+          property: connectionString
       - key: CORS_ORIGINS
-        fromService:
-          name: sss-frontend
-          type: web
-          property: host
-      - key: FRONTEND_URL
-        fromService:
-          name: sss-frontend
-          type: web
-          property: url
+        value: "*"
 
   # ---- Frontend Static Site ----
   - type: web
     name: sss-frontend
     env: static
-    region: oregon
     rootDir: frontend
     buildCommand: "npm ci && npm run build"
     staticPublishPath: dist
@@ -70,5 +51,4 @@ services:
         fromService:
           name: sss-backend
           type: web
-          property: url
-          append: /api
+          property: host

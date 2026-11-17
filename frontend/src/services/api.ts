@@ -1,8 +1,13 @@
 import axios, { AxiosError } from "axios";
 
-export const API_BASE =
-  import.meta.env.VITE_API_BASE_URL ||
-  (import.meta.env.PROD ? "/api" : "http://localhost:5000/api");
+let rawBase = (import.meta.env.VITE_API_BASE_URL || "").trim();
+if (rawBase && !rawBase.startsWith("http://") && !rawBase.startsWith("https://") && !rawBase.startsWith("/")) {
+  rawBase = `https://${rawBase}`;
+}
+if (rawBase && !rawBase.endsWith("/api") && !rawBase.endsWith("/api/")) {
+  rawBase = `${rawBase.replace(/\/+$/, "")}/api`;
+}
+export const API_BASE = rawBase || (import.meta.env.PROD ? "/api" : "http://localhost:5000/api");
 const ACCESS = "sss_access", REFRESH = "sss_refresh";
 
 export const tokens = {
