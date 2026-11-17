@@ -38,15 +38,18 @@ def _ts():
 
 
 def _pk(table):
-    return sa.PrimaryKeyConstraint("id", name=f"pk_{table}")
+    name = f"pk_{table}"
+    return sa.PrimaryKeyConstraint("id", name=name[:63])
 
 
 def _fk(table, col, ref, ondelete):
-    return sa.ForeignKeyConstraint([col], [f"{ref}.id"], name=f"fk_{table}_{col}_{ref}", ondelete=ondelete)
+    name = f"fk_{table}_{col}_{ref}"
+    return sa.ForeignKeyConstraint([col], [f"{ref}.id"], name=name[:63], ondelete=ondelete)
 
 
 def _ix(table, *cols, unique=False, name=None):
-    op.create_index(name or f"ix_{table}_{cols[0]}", table, list(cols), unique=unique)
+    idx_name = name or f"ix_{table}_{cols[0]}"
+    op.create_index(idx_name[:63], table, list(cols), unique=unique)
 
 
 def upgrade():
