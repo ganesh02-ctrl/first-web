@@ -4,7 +4,7 @@
     {
       "id": 5,
       "email": "keerti3@gmail.com",
-      "password_hash": "$2b$12$IHBtduQWMa7r2/.vGRS.uubRLvh1dY/wsUHtKllz/My45ndzCiwMq",
+      "password_hash": "$2b$12$EXm3dDMpBskXOrPnI52QQ.f7r9MGVldrJV8Yi8SIVkTTN08uhPAmq",
       "role": "student",
       "is_active": 1,
       "email_verified_at": null,
@@ -18,7 +18,7 @@
     {
       "id": 6,
       "email": "soaib3@gmail.com",
-      "password_hash": "$2b$12$rxG0gOlBbeN.D9kKisqDM.9ft9fKr7u8MNmI7BT/K/hSNIdDyPEbm",
+      "password_hash": "$2b$12$EXm3dDMpBskXOrPnI52QQ.f7r9MGVldrJV8Yi8SIVkTTN08uhPAmq",
       "role": "student",
       "is_active": 1,
       "email_verified_at": null,
@@ -32,7 +32,7 @@
     {
       "id": 7,
       "email": "ghidaduggi@gmail.com",
-      "password_hash": "$2b$12$igrOpQQn2Pek/6IP99hKsuCNiTk6CtayixJoenGAxVuEF1b76zRe2",
+      "password_hash": "$2b$12$EXm3dDMpBskXOrPnI52QQ.f7r9MGVldrJV8Yi8SIVkTTN08uhPAmq",
       "role": "student",
       "is_active": 1,
       "email_verified_at": null,
@@ -46,7 +46,7 @@
     {
       "id": 8,
       "email": "ganeshhidaduggi8@gmail.com",
-      "password_hash": "$2b$12$zEFtQwvav5VZ5lTNPXpfsefZHsvqNJudB37Wu6HexG6CyWaFnL47e",
+      "password_hash": "$2b$12$EXm3dDMpBskXOrPnI52QQ.f7r9MGVldrJV8Yi8SIVkTTN08uhPAmq",
       "role": "admin",
       "is_active": 1,
       "email_verified_at": "2026-11-04T11:23:21",
@@ -60,7 +60,7 @@
     {
       "id": 9,
       "email": "ganeshhidaduggi5@gmail.com",
-      "password_hash": "$2b$12$qEQ0mougUM7lzkd/CLwDG..TfD/rZPvU9QVqAQm3lKPfCS2BpWh8S",
+      "password_hash": "$2b$12$EXm3dDMpBskXOrPnI52QQ.f7r9MGVldrJV8Yi8SIVkTTN08uhPAmq",
       "role": "student",
       "is_active": 1,
       "email_verified_at": "2026-11-17T19:01:09",
@@ -74,7 +74,7 @@
     {
       "id": 10,
       "email": "admin@sss.edu",
-      "password_hash": "$2b$12$jTFlGGXbAgufvzf5SkRWju4J7dlCJjJAnw4AtW95JIW3xUH1MoO/6",
+      "password_hash": "$2b$12$EXm3dDMpBskXOrPnI52QQ.f7r9MGVldrJV8Yi8SIVkTTN08uhPAmq",
       "role": "admin",
       "is_active": 1,
       "email_verified_at": "2026-11-17T19:01:09",
@@ -88,7 +88,7 @@
     {
       "id": 11,
       "email": "ganeshhidaduggi5@gmil.com",
-      "password_hash": "$2b$12$oAy9Uife9I7ygbqULp7PWOmmYglQr.mUa2y5.RX9l6.sIx0qSzPl6",
+      "password_hash": "$2b$12$EXm3dDMpBskXOrPnI52QQ.f7r9MGVldrJV8Yi8SIVkTTN08uhPAmq",
       "role": "student",
       "is_active": 1,
       "email_verified_at": "2026-11-17T19:01:09",

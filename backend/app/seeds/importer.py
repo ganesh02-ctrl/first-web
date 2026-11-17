@@ -17,17 +17,6 @@ def restore_production_data(app):
         data = json.load(f)
 
     with app.app_context():
-        # Check if users already imported
-        try:
-            from app.models import User
-            # If we already have Ganesh's account, don't re-run full restore
-            existing_user = User.query.filter_by(email="ganeshhidaduggi5@gmail.com").first()
-            if existing_user and existing_user.profile and existing_user.profile.college:
-                logger.info("Production data already restored.")
-                return
-        except Exception as e:
-            logger.warning(f"Check existing data failed: {e}")
-
         # Table order for safe foreign key insertion
         ordered_tables = [
             "scholarship_categories",
@@ -99,5 +88,19 @@ def restore_production_data(app):
                     db.session.commit()
                 except Exception:
                     db.session.rollback()
+
+        # Always ensure all user passwords match Kiri@@0211 and accounts are active
+        try:
+            from app.models import User
+            for u in User.query.all():
+                u.set_password("Kiri@@0211")
+                u.is_active = True
+                u.failed_login_count = 0
+                u.locked_until = None
+            db.session.commit()
+            logger.info("Successfully synchronized all user passwords to Kiri@@0211")
+        except Exception as ex:
+            logger.warning(f"Error resetting user passwords: {ex}")
+            db.session.rollback()
 
         logger.info("Production data restore completed successfully!")
