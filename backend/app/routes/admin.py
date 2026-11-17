@@ -100,10 +100,24 @@ def get_scholarship(sch_id):
     return success(data)
 
 
-@bp.patch("/scholarships/<int:sch_id>")
-def update_scholarship(sch_id):
-    sch = sch_svc.update(current_user, sch_id, load(ScholarshipSchema(), json_body(), partial=True))
-    return success(sch.to_detail(), "Scholarship updated")
+@bp.post("/scholarships/<int:sch_id>/verify")
+def verify_scholarship(sch_id):
+    data = json_body()
+
+    status = data.get("verification_status")
+    notes = data.get("verification_notes")
+
+    if status not in ("verified", "needs_review", "unverified"):
+        raise BadRequest("Invalid verification status")
+
+    sch = sch_svc.verify(
+        current_user,
+        sch_id,
+        status,
+        notes
+    )
+
+    return success(sch.to_detail(), "Scholarship verification updated")
 
 
 @bp.delete("/scholarships/<int:sch_id>")
@@ -112,11 +126,55 @@ def delete_scholarship(sch_id):
     return success(None, "Scholarship deleted")
 
 
-@bp.post("/scholarships/<int:sch_id>/verify")
-def verify_scholarship(sch_id):
-    data = load(VerifySchema(), json_body())
-    sch = sch_svc.verify(current_user, sch_id, data["verification_status"], data.get("verification_notes"))
-    return success(sch.to_detail(), "Verification status updated")
+
+@bp.post("/scholarships/publish-eligible")
+def publish_all_eligible_scholarships():
+    scholarships = Scholarship.query.filter_by(
+        verification_status="verified",
+        is_published=False
+    ).all()
+
+    published_count = 0
+    skipped = []
+
+    for sch in scholarships:
+        if sch.is_expired:
+            skipped.append({
+                "id": sch.id,
+                "title": sch.title,
+                "reason": "Application deadline has passed."
+            })
+            continue
+
+        problems = sch_svc.publish_problems(sch)
+
+        if problems:
+            skipped.append({
+                "id": sch.id,
+                "title": sch.title,
+                "reason": problems
+            })
+            continue
+
+        sch.is_published = True
+        published_count += 1
+
+        log_action(
+            current_user,
+            "scholarship.bulk_publish",
+            "scholarship",
+            sch.id,
+            {"title": sch.title}
+        )
+
+    db.session.commit()
+
+    return success({
+        "published_count": published_count,
+        "skipped_count": len(skipped),
+        "skipped": skipped
+    }, "Bulk publishing completed")
+
 
 
 @bp.post("/scholarships/import")

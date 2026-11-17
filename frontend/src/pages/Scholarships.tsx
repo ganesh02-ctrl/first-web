@@ -31,7 +31,7 @@ export default function Scholarships() {
         <Field label="Sort"><Select value={f.sort} onChange={set("sort")} options={[{ value: "deadline", label: "Deadline" }, { value: "newest", label: "Newest" }, { value: "title", label: "Title" }]} /></Field>
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={f.include_expired === "true"} onChange={(e) => set("include_expired")(e.target.checked ? "true" : "")} />Include expired</label>
         <div className="flex gap-2 md:col-span-3 md:justify-end">
-          <button type="button" className="btn-secondary" onClick={() => { setF(initial); setApplied(initial); }}>Reset</button>
+          <button type="button" className="btn-secondary" onClick={() => { setF(initial); setApplied(initial); setPage(1); }}>Reset</button>
           <button className="btn-primary">Apply filters</button></div>
       </form>
       {loading ? <Spinner /> : error ? <ErrorState message={error} onRetry={reload} /> :

@@ -18,3 +18,5 @@ requests==2.32.3
 tzdata==2024.2
 waitress==3.0.0
 pytest==8.3.3
+openpyxl==3.1.5
+pypdf==6.21.4

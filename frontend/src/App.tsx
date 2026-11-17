@@ -12,9 +12,8 @@ import Scholarships from "./pages/Scholarships";
 import ScholarshipDetail from "./pages/ScholarshipDetail";
 import Tracked from "./pages/Tracked";
 import Applications from "./pages/Applications";
-import SgpaCalculator from "./pages/SgpaCalculator";
-import CgpaCalculator from "./pages/CgpaCalculator";
-import Semesters from "./pages/Semesters";
+import MasterRecords from "./pages/MasterRecords";
+import GradingPolicy from "./pages/admin/GradingPolicy";
 import Achievements from "./pages/Achievements";
 import AchievementForm from "./pages/AchievementForm";
 import Documents from "./pages/Documents";
@@ -35,40 +34,68 @@ export default function App() {
       <Route path="/verify-email" element={<VerifyEmail />} />
       <Route path="/reset-password" element={<ResetPassword />} />
       <Route path="/p/:slug" element={<PublicPortfolio />} />
+
       <Route element={<GuestOnly />}>
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
       </Route>
+
       <Route element={<RequireAuth />}>
         <Route element={<AppLayout />}>
           <Route path="/scholarships" element={<Scholarships />} />
-          <Route path="/scholarships/:id" element={<ScholarshipDetail />} />
+          <Route
+            path="/scholarships/:id"
+            element={<ScholarshipDetail />}
+          />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/notifications" element={<Notifications />} />
+
           <Route element={<RequireAuth role="student" />}>
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/tracked" element={<Tracked />} />
             <Route path="/applications" element={<Applications />} />
-            <Route path="/sgpa" element={<SgpaCalculator />} />
-            <Route path="/cgpa" element={<CgpaCalculator />} />
-            <Route path="/semesters" element={<Semesters />} />
+            <Route
+              path="/master-semesters"
+              element={<MasterRecords />}
+            />
             <Route path="/achievements" element={<Achievements />} />
-            <Route path="/achievements/new" element={<AchievementForm />} />
-            <Route path="/achievements/:id/edit" element={<AchievementForm />} />
+            <Route
+              path="/achievements/new"
+              element={<AchievementForm />}
+            />
+            <Route
+              path="/achievements/:id/edit"
+              element={<AchievementForm />}
+            />
             <Route path="/documents" element={<Documents />} />
             <Route path="/profile" element={<Profile />} />
           </Route>
+
           <Route path="/admin" element={<RequireAuth role="admin" />}>
             <Route index element={<AdminDashboard />} />
-            <Route path="scholarships" element={<AdminScholarships />} />
-            <Route path="scholarships/new" element={<AdminScholarshipForm />} />
-            <Route path="scholarships/:id" element={<AdminScholarshipForm />} />
+            <Route
+              path="scholarships"
+              element={<AdminScholarships />}
+            />
+            <Route
+              path="scholarships/new"
+              element={<AdminScholarshipForm />}
+            />
+            <Route
+              path="scholarships/:id"
+              element={<AdminScholarshipForm />}
+            />
             <Route path="students" element={<AdminStudents />} />
             <Route path="reports" element={<AdminReports />} />
+            <Route
+              path="grading-policy"
+              element={<GradingPolicy />}
+            />
           </Route>
         </Route>
       </Route>
+
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

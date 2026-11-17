@@ -3,6 +3,8 @@ from flask import Flask
 
 
 def register_blueprints(app: Flask) -> None:
+    from app.routes.admin_compat import bp as admin_compat_bp
+    from app.routes.master import bp as master_bp
     from app.routes.academics import bp as academics_bp
     from app.routes.achievements import bp as achievements_bp
     from app.routes.admin import bp as admin_bp
@@ -14,6 +16,18 @@ def register_blueprints(app: Flask) -> None:
     from app.routes.students import bp as students_bp
     from app.routes.tracking import bp as tracking_bp
 
-    for bp in (auth_bp, students_bp, scholarships_bp, tracking_bp, academics_bp, achievements_bp,
-               documents_bp, notifications_bp, admin_bp, public_bp):
-        app.register_blueprint(bp)
+    for blueprint in (
+        admin_compat_bp,
+        master_bp,
+        auth_bp,
+        students_bp,
+        scholarships_bp,
+        tracking_bp,
+        academics_bp,
+        achievements_bp,
+        documents_bp,
+        notifications_bp,
+        admin_bp,
+        public_bp,
+    ):
+        app.register_blueprint(blueprint)

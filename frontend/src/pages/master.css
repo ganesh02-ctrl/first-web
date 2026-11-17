@@ -1,0 +1,419 @@
+.master {
+  color: #172647;
+  background: #f8faff;
+  border-radius: 24px;
+  padding: clamp(16px, 3vw, 30px);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.master h1 {
+  font-size: clamp(22px, 3vw, 30px);
+  font-weight: 750;
+  letter-spacing: -0.025em;
+}
+
+.master h2 {
+  font-size: 24px;
+  font-weight: 750;
+}
+
+.master h3 {
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.ms-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-bottom: 24px;
+}
+
+.ms-header p,
+.ms-help {
+  color: #566580;
+}
+
+.master .ms-eyebrow {
+  color: #5444b7;
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.13em;
+  margin-bottom: 6px;
+}
+
+.ms-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.master button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 40px;
+  border: 1px solid #d5def0;
+  border-radius: 10px;
+  padding: 8px 13px;
+  background: white;
+  color: #233862;
+  font-weight: 600;
+  font-size: 12px;
+  transition: background 0.15s;
+}
+
+.master button:hover {
+  background: #eef2ff;
+}
+
+.master button.ms-primary {
+  background: #3f4fc4;
+  color: #fff;
+  border-color: #3f4fc4;
+}
+
+.master button.ms-primary:hover {
+  background: #323fa4;
+}
+
+.master button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.master :focus-visible {
+  outline: 3px solid #7565d8;
+  outline-offset: 3px;
+}
+
+.ms-notice {
+  background: #edf1ff;
+  border: 1px solid #dbe2ff;
+  border-radius: 14px;
+  padding: 15px 18px;
+  color: #35466e;
+  font-size: 12px;
+  margin: 18px 0;
+}
+
+.ms-notice p {
+  margin-top: 6px;
+}
+
+.ms-sem-nav {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 20px 0;
+}
+
+.ms-sem-nav a {
+  padding: 7px 12px;
+  background: white;
+  border: 1px solid #d5def0;
+  border-radius: 9px;
+  color: #3546a4;
+  font-size: 12px;
+}
+
+.ms-semester {
+  background: white;
+  border: 1px solid #dfe5f2;
+  border-radius: 17px;
+  margin: 14px 0;
+  box-shadow: 0 4px 16px #24366706;
+  scroll-margin-top: 20px;
+  overflow: hidden;
+}
+
+.ms-semester summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px;
+  cursor: pointer;
+  gap: 12px;
+  list-style: none;
+}
+
+.ms-semester summary::before {
+  content: "+";
+  font-size: 22px;
+  color: #6554bf;
+}
+
+.ms-semester[open] summary::before {
+  content: "−";
+}
+
+.ms-semester summary > span:first-of-type {
+  flex: 1;
+}
+
+.ms-semester summary small {
+  display: block;
+  color: #61718d;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.ms-sem-score {
+  text-align: right;
+  color: #4150ab;
+}
+
+.ms-content {
+  border-top: 1px solid #edf0f8;
+  padding: 20px;
+}
+
+.ms-table-wrap {
+  overflow-x: auto;
+  margin: 18px 0;
+  border: 1px solid #e1e6f2;
+  border-radius: 12px;
+}
+
+.master table {
+  border-collapse: collapse;
+  width: 100%;
+  text-align: left;
+  font-size: 12px;
+  min-width: 900px;
+}
+
+.master caption {
+  text-align: left;
+  padding: 10px 14px;
+  color: #60708a;
+  background: #fafbff;
+}
+
+.master th,
+.master td {
+  padding: 13px 12px;
+  border-bottom: 1px solid #eaf0f8;
+  vertical-align: middle;
+}
+
+.master thead {
+  background: #f1f4fc;
+  color: #3d5078;
+}
+
+.master tbody th {
+  min-width: 130px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.master tbody tr:last-child td,
+.master tbody tr:last-child th {
+  border-bottom: 0;
+}
+
+.ms-empty {
+  text-align: center;
+  color: #61718d;
+  height: 90px;
+}
+
+.ms-status {
+  display: inline-block;
+  border-radius: 8px;
+  padding: 4px 8px;
+  background: #edf2fc;
+  color: #375174;
+}
+
+.ms-fail {
+  background: #fff0f1;
+  color: #ad2340;
+}
+
+.ms-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 18px 0;
+}
+
+.ms-metrics > div {
+  border: 1px solid #e0e5f5;
+  border-radius: 13px;
+  padding: 16px;
+  background: linear-gradient(
+    135deg,
+    #f7f9ff,
+    white
+  );
+}
+
+.ms-metrics span,
+.ms-metrics small {
+  display: block;
+  color: #5a6a85;
+  font-size: 11px;
+}
+
+.ms-metrics strong {
+  display: block;
+  font-size: 25px;
+  color: #3e469d;
+  letter-spacing: -0.04em;
+}
+
+.ms-cumulative {
+  padding: 12px 15px;
+  border-radius: 10px;
+  background: #f2effc;
+  color: #4f4086;
+}
+
+.ms-help {
+  font-size: 12px;
+  margin: 10px 0;
+}
+
+.ms-total {
+  background: white;
+  border: 1px solid #d4dafa;
+  border-radius: 18px;
+  padding: 24px;
+  margin-top: 26px;
+  box-shadow: 0 6px 25px #5a4bc00a;
+}
+
+.ms-editor {
+  padding: 20px;
+  border: 1px solid #d4ddf7;
+  background: #f9faff;
+  border-radius: 14px;
+  margin: 18px 0;
+}
+
+.ms-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin: 14px 0;
+}
+
+.master label {
+  font-size: 12px;
+  color: #435575;
+  font-weight: 550;
+}
+
+.master input:not([type="checkbox"]),
+.master select {
+  display: block;
+  width: 100%;
+  border: 1px solid #cbd5eb;
+  border-radius: 8px;
+  background: white;
+  color: #172647;
+  padding: 10px;
+  margin-top: 5px;
+  font: inherit;
+  min-height: 42px;
+}
+
+.master input[type="checkbox"] {
+  accent-color: #4d4fbd;
+  width: 17px;
+  height: 17px;
+}
+
+.ms-check {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.master fieldset {
+  min-width: 0;
+}
+
+.master legend {
+  font-weight: 700;
+}
+
+@media (max-width: 1000px) {
+  .ms-metrics {
+    grid-template-columns: repeat(
+      2,
+      minmax(0, 1fr)
+    );
+  }
+
+  .ms-fields {
+    grid-template-columns: repeat(
+      2,
+      minmax(0, 1fr)
+    );
+  }
+}
+
+@media (max-width: 560px) {
+  .master {
+    padding: 14px;
+  }
+
+  .ms-content,
+  .ms-total,
+  .ms-editor {
+    padding: 14px;
+  }
+
+  .ms-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .ms-metrics {
+    gap: 8px;
+  }
+
+  .ms-metrics > div {
+    padding: 11px;
+  }
+
+  .ms-metrics strong {
+    font-size: 22px;
+  }
+
+  .ms-header .ms-actions {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .master * {
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media print {
+  .master button,
+  .ms-sem-nav,
+  .ms-editor {
+    display: none !important;
+  }
+
+  .master {
+    padding: 0;
+    background: white;
+  }
+
+  .ms-semester {
+    break-inside: avoid;
+    box-shadow: none;
+  }
+}

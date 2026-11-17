@@ -1,0 +1,74 @@
+services:
+  # ---- Backend Web Service ----
+  - type: web
+    name: sss-backend
+    env: python
+    region: oregon
+    plan: starter
+    rootDir: backend
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "flask --app run.py db upgrade && waitress-serve --host=0.0.0.0 --port=$PORT run:app"
+    healthCheckPath: /api/health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: SECRET_KEY
+        generateValue: true
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: JWT_ACCESS_TOKEN_MINUTES
+        value: "30"
+      - key: JWT_REFRESH_TOKEN_DAYS
+        value: "14"
+      - key: BCRYPT_ROUNDS
+        value: "12"
+      - key: MYSQL_HOST
+        fromDatabase:
+          name: sss-db
+          property: host
+      - key: MYSQL_PORT
+        fromDatabase:
+          name: sss-db
+          property: port
+      - key: MYSQL_DATABASE
+        fromDatabase:
+          name: sss-db
+          property: database
+      - key: MYSQL_USER
+        fromDatabase:
+          name: sss-db
+          property: user
+      - key: MYSQL_PASSWORD
+        fromDatabase:
+          name: sss-db
+          property: password
+      - key: CORS_ORIGINS
+        fromService:
+          name: sss-frontend
+          type: web
+          property: host
+      - key: FRONTEND_URL
+        fromService:
+          name: sss-frontend
+          type: web
+          property: url
+
+  # ---- Frontend Static Site ----
+  - type: web
+    name: sss-frontend
+    env: static
+    region: oregon
+    rootDir: frontend
+    buildCommand: "npm ci && npm run build"
+    staticPublishPath: dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_BASE_URL
+        fromService:
+          name: sss-backend
+          type: web
+          property: url
+          append: /api

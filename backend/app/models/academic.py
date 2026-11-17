@@ -112,6 +112,22 @@ class Subject(TimestampMixin, db.Model):
     grade_point = db.Column(db.Numeric(4, 2), nullable=False)
     counts_in_gpa = db.Column(db.Boolean, nullable=False, default=True)
 
+    maximum_marks = db.Column(db.Numeric(10, 2), nullable=True)
+    passing_marks = db.Column(db.Numeric(10, 2), nullable=True)
+    marks_obtained = db.Column(db.Numeric(10, 2), nullable=True)
+    master_managed = db.Column(
+        db.Boolean,
+        nullable=False,
+        default=False,
+        server_default=db.false(),
+    )
+    record_version = db.Column(
+        db.Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+    )
+
     semester = db.relationship("Semester", back_populates="subjects")
 
     def to_dict(self) -> dict:

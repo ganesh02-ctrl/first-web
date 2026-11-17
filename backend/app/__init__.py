@@ -66,6 +66,7 @@ def _register_security_headers(app: Flask) -> None:
 
 
 def _register_health(app: Flask) -> None:
+    @app.get("/health")
     @app.get("/api/health")
     @limiter.exempt
     def health():
