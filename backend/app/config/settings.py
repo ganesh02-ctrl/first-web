@@ -38,6 +38,10 @@ def _list(name: str, default: str = "") -> list[str]:
 def _database_uri() -> str:
     url = os.getenv("DATABASE_URL")
     if url:
+        if url.startswith("mysql://"):
+            url = url.replace("mysql://", "mysql+pymysql://", 1)
+        elif url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql://", 1)
         return url
     user = quote_plus(os.getenv("MYSQL_USER", "sss_user"))
     password = quote_plus(os.getenv("MYSQL_PASSWORD", ""))
