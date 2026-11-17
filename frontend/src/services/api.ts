@@ -7,7 +7,7 @@ if (rawBase && !rawBase.startsWith("http://") && !rawBase.startsWith("https://")
 if (rawBase && !rawBase.endsWith("/api") && !rawBase.endsWith("/api/")) {
   rawBase = `${rawBase.replace(/\/+$/, "")}/api`;
 }
-export const API_BASE = rawBase || (import.meta.env.PROD ? "/api" : "http://localhost:5000/api");
+export const API_BASE = rawBase || (import.meta.env.PROD ? "https://sss-backend-fqgo.onrender.com/api" : "http://localhost:5000/api");
 const ACCESS = "sss_access", REFRESH = "sss_refresh";
 
 export const tokens = {
