@@ -99,31 +99,10 @@ def _maybe_start_scheduler(app: Flask) -> None:
 def _seed_initial_users(app: Flask) -> None:
     if app.config.get("TESTING"):
         return
-    with app.app_context():
-        try:
-            from app.models import User, StudentProfile, NotificationPreference
-            from app.utils.timeutils import utcnow
-
-            def ensure_user(email: str, password: str, name: str, role: str):
-                u = User.query.filter_by(email=email).first()
-                if not u:
-                    u = User(email=email, role=role, is_active=True)
-                    u.profile = StudentProfile(full_name=name)
-                    u.notification_preference = NotificationPreference(email_enabled=False)
-                    db.session.add(u)
-                u.is_active = True
-                u.role = role
-                u.set_password(password)
-                u.email_verified_at = u.email_verified_at or utcnow()
-                u.failed_login_count = 0
-                u.locked_until = None
-
-            ensure_user("admin@sss.edu", "Admin@123456", "System Administrator", "admin")
-            ensure_user("ganeshhidaduggi5@gmail.com", "Student@12345", "Ganesh", "student")
-            ensure_user("ganeshhidaduggi5@gmil.com", "Student@12345", "Ganesh", "student")
-            db.session.commit()
-        except Exception as e:
-            app.logger.warning(f"Could not seed initial users: {e}")
-            db.session.rollback()
+    try:
+        from app.seeds.importer import restore_production_data
+        restore_production_data(app)
+    except Exception as e:
+        app.logger.warning(f"Error during production data restore: {e}")
     from app.services.scheduler import start_scheduler
     start_scheduler(app)
