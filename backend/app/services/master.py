@@ -303,11 +303,17 @@ def policy(lock=False):
         if lock
         else query.first()
     )
+    cfg = DEFAULT_POLICY
+    if row and row.configuration:
+        cfg = row.configuration
+        if isinstance(cfg, str):
+            try:
+                cfg = json.loads(cfg)
+            except Exception:
+                cfg = DEFAULT_POLICY
     return {
         "version": row.version if row else 0,
-        "configuration": copy.deepcopy(
-            row.configuration if row else DEFAULT_POLICY
-        ),
+        "configuration": copy.deepcopy(cfg),
     }
 
 
